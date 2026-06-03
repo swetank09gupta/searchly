@@ -175,7 +175,7 @@ A Postman collection is provided in [deploy/postman/](deploy/postman/) and a run
 
 ## Documentation
 
-> **For evaluators:** [`docs/SUBMISSION.md`](docs/SUBMISSION.md) is a single-file document containing Architecture + Production Readiness + Experience + AI Usage (per the assignment brief's "single PDF or Markdown file" requirement). All the other docs below are the canonical modular versions.
+> [`docs/SUBMISSION.md`](docs/SUBMISSION.md) is a single-file document containing Architecture + Production Readiness + Experience + AI Usage (per the assignment brief's "single PDF or Markdown file" requirement). All the other docs below are the canonical modular versions.
 
 | Document | Purpose |
 |---|---|
