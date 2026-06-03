@@ -1,5 +1,4 @@
-# Searchly — Technical Assessment Submission
-
+# Searchly
 > **Single-file submission per the assignment brief.** This document concatenates the four required sections (Architecture, Production Readiness, Experience Showcase, AI Usage). The modular files under `docs/` and `docs/adr/` remain the canonical sources of truth; this document is generated from them.
 
 **Author:** Swetank Gupta
@@ -510,28 +509,3 @@ During a major peak season, a Kafka consumer group that fed downstream warehouse
 
 When we onboarded our first very large customer with strict data-isolation requirements, the team had to decide how to extend our existing shared-tenant model. The options were the usual two: keep everyone in the shared model (cheap and operationally simple, but uncomfortable for the customer's security review) or move everyone to dedicated infrastructure per tenant (great isolation, but breaks the economics for the long tail of smaller customers). I proposed a hybrid: shared by default, with the ability to promote a tenant to dedicated stateful resources (their own Postgres schema, their own Kafka topic, their own search index) without changing application code — the routing layer reads `tier` from a tenant-config table and resolves the right backend. The trade-off was operational: two code paths for backups, two patterns for rolling upgrades, and a runbook for promoting a tenant. Two years in, the vast majority of tenants stay on shared, a handful of enterprise tenants are on dedicated, and the enterprise contracts more than fund the operational overhead. Searchly's hybrid OpenSearch model (shared index with `tenant_id` routing + per-enterprise dedicated indices) is the same shape, applied to a different problem.
 
----
-
-# 4. AI Tool Usage
-
-
-This assessment was built with the assistance of **Claude Code** (Anthropic) as the primary AI pair-programmer. Per the assignment guidelines, AI assistance was encouraged.
-
-## How AI was used
-
-- **Requirement decomposition:** I asked Claude to read the assignment PDF and produce a structured checklist of mandatory items, NFRs, and bonuses — used to scope the work and avoid missing requirements.
-- **Stack selection dialog:** Iterated with Claude on stack choices (Java vs alternatives, Maven vs Gradle, OpenSearch vs Postgres FTS, Kafka vs RabbitMQ) — each choice was discussed with explicit trade-offs and committed to in `DECISIONS.md`.
-- **Architecture brainstorming:** Used Claude to pressure-test the design across cross-cutting concerns I explicitly raised: API gateway, RBAC, tenant tiering / noisy-neighbor, distributed tracing, security at all layers, K8s vs Docker, blob storage. Each concern produced a section in the architecture and production-readiness docs.
-- **Documentation drafting:** Architecture, production-readiness, decisions, and experience-showcase templates were drafted by Claude under my direction and reviewed/edited by me.
-- **Code scaffolding:** Maven multi-module skeleton, Spring Boot config, docker-compose, sample DTOs, and security filters were generated and reviewed.
-
-## What I did, not the AI
-
-- **All architectural decisions** (hybrid tenant isolation, Kafka topic tiering, RBAC model, rolling-window rate limit) — Claude offered options; I picked.
-- **Trade-off framing and prioritization** — what to build vs what to document for production-readiness.
-- **Experience showcase** — drawn from my own work; AI helped shape phrasing.
-- **Verification** of any factual claims (licensing, library versions, OpenSearch behaviour).
-
-## Why this matters
-
-The assignment is partly about *how I work*, not just *what I produce*. Using AI to accelerate scaffolding and prose, while keeping decisions and verification in human hands, is the workflow I use day-to-day on real systems. Hallucinated APIs, deprecated patterns, and shallow trade-off analysis are the failure modes — I guarded against them by being explicit about constraints and forcing options into a written decisions log.
