@@ -11,7 +11,6 @@
 1. [Architecture Design](#1-architecture-design) — from `docs/ARCHITECTURE.md`
 2. [Production Readiness Analysis](#2-production-readiness-analysis) — from `docs/PRODUCTION_READINESS.md`
 3. [Engineering Experience Showcase](#3-engineering-experience-showcase) — from `docs/EXPERIENCE.md`
-4. [AI Tool Usage](#4-ai-tool-usage) — from `docs/AI_USAGE.md`
 
 **Also in this repository (referenced but not embedded):**
 - [14 Architecture Decision Records](adr/README.md) — one per significant decision
