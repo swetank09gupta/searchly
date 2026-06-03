@@ -57,3 +57,6 @@ failsafe-reports/
 # Local data
 data/
 volumes/
+
+# Assignment artifacts (not for public repo)
+Requirements.pdf
