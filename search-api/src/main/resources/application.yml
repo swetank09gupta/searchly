@@ -1,0 +1,63 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: search-api
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/searchly}
+    username: ${POSTGRES_USER:searchly}
+    password: ${POSTGRES_PASSWORD:searchly}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate.jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+
+searchly:
+  opensearch:
+    host: ${OPENSEARCH_HOST:localhost}
+    port: ${OPENSEARCH_PORT:9200}
+    scheme: http
+  cache:
+    ttl-seconds: 60
+  kafka:
+    topic-shared: indexing.shared
+    topic-enterprise-prefix: indexing.enterprise.
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    redis:
+      enabled: true
+    db:
+      enabled: true
+
+logging:
+  level:
+    root: INFO
+    dev.searchly: DEBUG

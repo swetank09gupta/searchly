@@ -1,0 +1,19 @@
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /workspace
+COPY pom.xml ./
+COPY common/pom.xml common/
+COPY search-api/pom.xml search-api/
+COPY indexer/pom.xml indexer/
+COPY gateway/pom.xml gateway/
+RUN mvn -B -q -pl common,search-api -am dependency:go-offline || true
+COPY common/src common/src
+COPY search-api/src search-api/src
+RUN mvn -B -pl common,search-api -am package -DskipTests
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+RUN groupadd -r app && useradd -r -g app app
+COPY --from=build /workspace/search-api/target/search-api.jar /app/app.jar
+USER app
+EXPOSE 8081
+ENTRYPOINT ["java","-jar","/app/app.jar"]

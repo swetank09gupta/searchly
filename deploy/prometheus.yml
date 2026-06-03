@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: search-api
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["search-api:8081"]
+  - job_name: indexer
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["indexer:8082"]
+  - job_name: gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["gateway:8080"]

@@ -1,0 +1,29 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: indexer
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: indexer
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "dev.searchly.common"
+        spring.json.value.default.type: dev.searchly.common.IndexingEvent
+        metadata.max.age.ms: 5000
+
+searchly:
+  opensearch:
+    host: ${OPENSEARCH_HOST:localhost}
+    port: ${OPENSEARCH_PORT:9200}
+    scheme: http
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus

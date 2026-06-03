@@ -1,0 +1,19 @@
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /workspace
+COPY pom.xml ./
+COPY common/pom.xml common/
+COPY search-api/pom.xml search-api/
+COPY indexer/pom.xml indexer/
+COPY gateway/pom.xml gateway/
+RUN mvn -B -q -pl common,indexer -am dependency:go-offline || true
+COPY common/src common/src
+COPY indexer/src indexer/src
+RUN mvn -B -pl common,indexer -am package -DskipTests
+
+FROM eclipse-temurin:21-jre
+WORKDIR /app
+RUN groupadd -r app && useradd -r -g app app
+COPY --from=build /workspace/indexer/target/indexer.jar /app/app.jar
+USER app
+EXPOSE 8082
+ENTRYPOINT ["java","-jar","/app/app.jar"]

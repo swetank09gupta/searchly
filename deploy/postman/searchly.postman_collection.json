@@ -1,0 +1,107 @@
+{
+  "info": {
+    "name": "Searchly",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Sample requests for Searchly. Set {{base}}, {{tenant}}, {{roles}}, {{user}} in your environment."
+  },
+  "variable": [
+    {"key": "base", "value": "http://localhost:8080"},
+    {"key": "tenant", "value": "acme"},
+    {"key": "roles", "value": "EDITOR,VIEWER"},
+    {"key": "user", "value": "alice"},
+    {"key": "docId", "value": ""},
+    {"key": "adminToken", "value": "dev-admin-token"}
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {"method": "GET", "url": "{{base}}/actuator/health"}
+    },
+    {
+      "name": "Index document",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "X-Tenant-Id", "value": "{{tenant}}"},
+          {"key": "X-User-Roles", "value": "{{roles}}"},
+          {"key": "X-User-Id", "value": "{{user}}"},
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "Idempotency-Key", "value": "{{$guid}}"}
+        ],
+        "url": "{{base}}/api/v1/documents",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"Q4 Revenue Report\",\n  \"content\": \"Revenue grew 23% YoY driven by enterprise sales.\",\n  \"metadata\": {\"author\":\"alice\",\"tags\":[\"finance\",\"2025\"]}\n}"
+        }
+      }
+    },
+    {
+      "name": "Search",
+      "request": {
+        "method": "GET",
+        "header": [
+          {"key": "X-Tenant-Id", "value": "{{tenant}}"},
+          {"key": "X-User-Roles", "value": "{{roles}}"},
+          {"key": "X-User-Id", "value": "{{user}}"}
+        ],
+        "url": "{{base}}/api/v1/search?q=revenue&tenant={{tenant}}&fuzzy=true&highlight=true"
+      }
+    },
+    {
+      "name": "Get document",
+      "request": {
+        "method": "GET",
+        "header": [
+          {"key": "X-Tenant-Id", "value": "{{tenant}}"},
+          {"key": "X-User-Roles", "value": "{{roles}}"},
+          {"key": "X-User-Id", "value": "{{user}}"}
+        ],
+        "url": "{{base}}/api/v1/documents/{{docId}}"
+      }
+    },
+    {
+      "name": "Admin · Create tenant",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "X-Admin-Token", "value": "{{adminToken}}"},
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "url": "{{base}}/api/v1/admin/tenants",
+        "body": {"mode": "raw", "raw": "{\n  \"id\": \"mycorp\",\n  \"name\": \"My Corp\",\n  \"tier\": \"PREMIUM\"\n}"}
+      }
+    },
+    {
+      "name": "Admin · Create user",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "X-Admin-Token", "value": "{{adminToken}}"},
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "url": "{{base}}/api/v1/admin/tenants/mycorp/users",
+        "body": {"mode": "raw", "raw": "{\n  \"id\": \"tester\",\n  \"displayName\": \"Test User\",\n  \"email\": \"tester@mycorp.test\",\n  \"roles\": \"TENANT_ADMIN,EDITOR,VIEWER\"\n}"}
+      }
+    },
+    {
+      "name": "Admin · List tenants",
+      "request": {
+        "method": "GET",
+        "header": [{"key": "X-Admin-Token", "value": "{{adminToken}}"}],
+        "url": "{{base}}/api/v1/admin/tenants"
+      }
+    },
+    {
+      "name": "Delete document",
+      "request": {
+        "method": "DELETE",
+        "header": [
+          {"key": "X-Tenant-Id", "value": "{{tenant}}"},
+          {"key": "X-User-Roles", "value": "{{roles}}"},
+          {"key": "X-User-Id", "value": "{{user}}"}
+        ],
+        "url": "{{base}}/api/v1/documents/{{docId}}"
+      }
+    }
+  ]
+}
