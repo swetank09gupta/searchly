@@ -94,7 +94,7 @@ services:
       timeout: 5s
       retries: 20
 
-  # Warehouse Intelligence Agent — answers live operational queries per customer lifecycle.
+  # Intelligence Agent — answers queries using RAG over indexed knowledge + live log access.
   #
   # Management API (port 8084):
   #   POST   /api/v1/customers                         register new customer (solution phase)
@@ -104,7 +104,7 @@ services:
   #
   # The answer endpoint is called by search-api (not directly by users):
   #   POST   /api/v1/agent/answer
-  warehouse-agent:
+  intelligence-agent:
     build:
       context: ../warehouse-agent
       dockerfile: Dockerfile
@@ -121,14 +121,14 @@ services:
       # AUTH_ENABLED: "true"   ← enable tenant isolation (required for customer-facing)
       AUTH_ENABLED:    ${AUTH_ENABLED:-false}
       # ADMIN_API_KEY: set this to a fixed key, otherwise one is auto-generated
-      # and printed to the logs on first start (docker compose logs warehouse-agent)
+      # and printed to the logs on first start (docker compose logs intelligence-agent)
       ADMIN_API_KEY:   ${ADMIN_API_KEY:-}
     volumes:
       # Read-only seed: imported once at startup
       - ../connectors/customers.yml:/app/customers.yml:ro
       - ../connectors/products.yml:/app/products.yml:ro
       # Read-write persistent registry: survives restarts, updated via API
-      - warehouse-agent-data:/app/data
+      - intelligence-agent-data:/app/data
       # SSH key for kubectl bastion access (mount your actual key)
       - ${SSH_KEY_PATH:-~/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
     ports: ["18084:8084"]
@@ -154,8 +154,8 @@ services:
       EMBEDDING_SERVICE_URL: http://embedding-service:8083
       OLLAMA_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
-      # Warehouse agent URL — enables live operational query routing
-      WAREHOUSE_AGENT_URL: http://warehouse-agent:8084
+      # Intelligence agent URL — enables live operational query routing
+      WAREHOUSE_AGENT_URL: http://intelligence-agent:8084
     ports: ["8081:8081"]
     depends_on:
       postgres:          { condition: service_healthy }
@@ -164,7 +164,7 @@ services:
       kafka:             { condition: service_healthy }
       embedding-service: { condition: service_healthy }
       ollama:            { condition: service_healthy }
-      warehouse-agent:   { condition: service_healthy }
+      intelligence-agent: { condition: service_healthy }
 
   indexer:
     build:
@@ -250,5 +250,5 @@ services:
 
 volumes:
   ollama-data:           # persists downloaded Ollama models across restarts
-  warehouse-agent-data:  # persists customer registry (customers_db.json) across restarts
+  intelligence-agent-data:  # persists customer registry (customers_db.json) across restarts
   sync-state:            # persists .sync_state.json (incremental repo indexing state)

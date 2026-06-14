@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  start.sh — GreyOrange Warehouse Intelligence — one command to start all
+#  start.sh — Searchly Intelligence — one command to start all
 # ─────────────────────────────────────────────────────────────────────────────
 # Usage:
 #   ./start.sh              # start everything, sync runs automatically
@@ -46,7 +46,7 @@ done
 if [[ "$ACTION" == "help" ]]; then
   cat <<'EOF'
 
-  GreyOrange Warehouse Intelligence — start.sh
+  Searchly Intelligence — start.sh
 
   ./start.sh              Start all services. Sync runs automatically.
   ./start.sh --rebuild    Same, but force-rebuild Docker images first.
@@ -111,7 +111,7 @@ fi
 #  START
 # ═════════════════════════════════════════════════════════════════════════════
 
-header "GreyOrange Warehouse Intelligence"
+header "Searchly Intelligence"
 
 # ── 1. Prereq checks ─────────────────────────────────────────────────────────
 info "Checking prerequisites..."
@@ -151,11 +151,11 @@ CONN_ENV="$SCRIPT_DIR/connectors/.env"
 if [[ ! -f "$CONN_ENV" ]]; then
   warn "connectors/.env not found — Jira/Confluence/GitHub sync will be skipped."
   warn "Create it with these keys:"
-  warn "  JIRA_URL=https://greyorange.atlassian.net"
+  warn "  JIRA_URL=https://your-org.atlassian.net"
   warn "  JIRA_EMAIL=your@email.com"
   warn "  JIRA_TOKEN=<your-atlassian-token>"
-  warn "  CONFLUENCE_SPACES=CE,GME,DEV,GSP,AE,GRYMTTR"
-  warn "  JIRA_PROJECTS=AES,AE,GM,SRE,PA,PKE"
+  warn "  CONFLUENCE_SPACES=ENG,ARCH,DEV,OPS"
+  warn "  JIRA_PROJECTS=ENG,OPS,INFRA"
   warn "  GIT_TOKEN=<your-github-token>"
   touch "$CONN_ENV"
 fi
@@ -210,10 +210,10 @@ wait_for() {
   echo -e " ${GREEN}ready${NC} (${n}s)"
 }
 
-wait_for "OpenSearch"         "http://localhost:9200/_cluster/health"  120
-wait_for "Embedding service"  "http://localhost:8083/health"           90
-wait_for "Ollama + model"     "http://localhost:11434/"                300
-wait_for "Warehouse agent"    "http://localhost:8084/health"           90
+wait_for "OpenSearch"          "http://localhost:9200/_cluster/health"   120
+wait_for "Embedding service"   "http://localhost:18083/health"          90
+wait_for "Ollama + model"      "http://localhost:11434/"                300
+wait_for "Intelligence agent"  "http://localhost:18084/health"          90
 
 # ── 5. Summary ────────────────────────────────────────────────────────────────
 LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
@@ -223,8 +223,8 @@ FULL_HRS=$(grep -s '^SYNC_FULL_INTERVAL_HOURS' "$ENV_FILE" | cut -d= -f2- | xarg
 
 header "Ready"
 echo ""
-echo -e "  ${BOLD}Chat UI${NC}     →  http://${LOCAL_IP}:8084"
-echo -e "  ${BOLD}API docs${NC}    →  http://${LOCAL_IP}:8084/docs"
+echo -e "  ${BOLD}Chat UI${NC}     →  http://${LOCAL_IP}:18084"
+echo -e "  ${BOLD}API docs${NC}    →  http://${LOCAL_IP}:18084/docs"
 echo ""
 echo -e "  ${BOLD}LLM${NC}         ${OLLAMA_MODEL} on CPU  (~20-40s/query)"
 echo ""
@@ -239,11 +239,11 @@ echo    "    ./start.sh --force-sync   sync right now"
 echo    "    ./start.sh --stop         stop everything"
 echo ""
 
-if docker compose -f "$COMPOSE_FILE" logs warehouse-agent 2>/dev/null | grep -q "GENERATED ADMIN"; then
+if docker compose -f "$COMPOSE_FILE" logs intelligence-agent 2>/dev/null | grep -q "GENERATED ADMIN"; then
   warn "Auto-generated admin API key — retrieve it with:"
-  echo "    docker compose -f deploy/docker-compose.yml logs warehouse-agent | grep 'GENERATED ADMIN'"
+  echo "    docker compose -f deploy/docker-compose.yml logs intelligence-agent | grep 'GENERATED ADMIN'"
   echo ""
 fi
 
-echo -e "${GREEN}Open http://${LOCAL_IP}:8084 in your browser to start chatting.${NC}"
+echo -e "${GREEN}Open http://${LOCAL_IP}:18084 in your browser to start chatting.${NC}"
 echo ""
