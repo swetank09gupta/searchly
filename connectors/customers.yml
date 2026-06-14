@@ -1,0 +1,84 @@
+# Customer / Environment Registry
+#
+# Each entry describes one customer's deployment.
+# Used by TWO components:
+#
+#   1. sync.py  --only customer --customer <id>
+#        → pulls live deployment state into the knowledge index
+#          (tagged with metadata.customer, metadata.env, metadata.source)
+#
+#   2. intelligence-agent  (POST /api/v1/agent/answer?customer=<id>)
+#        → at query time, fetches live logs + version state via SSH/kubectl
+#          to answer operational questions about that specific environment
+#
+# How to add a customer:
+#   1. Copy the template block below
+#   2. Fill in id, name, env, products, k8s.*
+#   3. Restart the agent (or POST /api/v1/customers via API)
+#   4. Test: curl "http://localhost:8084/api/v1/agent/answer?customer=<id>&query=..."
+#
+# ── Field reference ──────────────────────────────────────────────────────────
+#   id             unique slug, used in API calls and query filters
+#   name           human-readable display name
+#   env            highest active lifecycle stage: dev / testing / staging / prod
+#   products       list of product names (matches products.yml keys)
+#   k8s_bastion    SSH jump host that can reach kubectl  (user@host)
+#   k8s_context    kubectl context name on the bastion
+#   k8s_namespace  k8s namespace where the application pods run
+#   pod_map        pod_name_prefix → product_name  (for targeted log fetching)
+#   aliases        alternative names the agent recognises in natural language
+#   notes          free text shown in agent responses
+#
+# ── Live log access (Mode A — zero credential storage) ──────────────────────
+#   If k8s_bastion is set and an ECK Elasticsearch stack is running, the agent
+#   automatically queries live logs by:
+#     SSH bastion → kubectl get secret (ES password at runtime) → kubectl exec
+#     filebeat-pod → curl ES ClusterIP
+#   No ES password is ever stored in this file.
+#
+#   Override defaults only if your ECK setup uses non-standard names:
+#     elastic_k8s_ns:     elastic-system               (namespace where ECK runs)
+#     elastic_k8s_secret: <release>-es-elastic-user   (Secret with ES password)
+#     elastic_k8s_svc:    <release>-es-http            (ES ClusterIP Service)
+#     elastic_index:      filebeat-*                   (index pattern for logs)
+
+customers:
+
+  # ── EXAMPLE: Production deployment ──────────────────────────────────────────
+  # Remove the '#' characters and fill in your values.
+
+  # - id: acme-prod
+  #   name: "Acme Corp — Production"
+  #   env: prod
+  #   products:
+  #     - platform
+  #     - backend
+  #   k8s_bastion:   deploy@your-bastion-host.example.com
+  #   k8s_context:   acme-prod                   # kubectl context on bastion
+  #   k8s_namespace: production                  # namespace where app pods run
+  #   pod_map:
+  #     api-server:   backend
+  #     worker:       backend
+  #     frontend:     platform
+  #   aliases:
+  #     - acme
+  #     - acmecorp
+  #   notes: "Multi-region deployment. Primary region: us-east-1."
+
+  # ── EXAMPLE: Staging deployment ─────────────────────────────────────────────
+
+  # - id: acme-staging
+  #   name: "Acme Corp — Staging"
+  #   env: staging
+  #   products:
+  #     - platform
+  #     - backend
+  #   k8s_bastion:   deploy@your-bastion-host.example.com
+  #   k8s_context:   acme-staging
+  #   k8s_namespace: staging
+  #   pod_map:
+  #     api-server:   backend
+  #     worker:       backend
+  #   notes: ""
+
+  # ── ADD YOUR CUSTOMERS BELOW ─────────────────────────────────────────────────

@@ -22,6 +22,24 @@ Format adapted from [Michael Nygard's template](https://cognitect.com/blog/2011/
 | [0013](0013-resilience.md) | Resilience4j for circuit breakers, retries, bulkheads | Accepted |
 | [0014](0014-deployment-strategy.md) | Docker Compose for local, Kubernetes for production | Accepted |
 
+### Intelligence layer (ADRs 0015–0020)
+
+ADRs 0015–0020 cover decisions specific to the organisation intelligence layer built on top of
+the Searchly platform (intelligence agent, connectors, ES log access).
+
+| # | Title | Status |
+|---|---|---|
+| [0015](0015-self-hosted-llm-ollama.md) | Self-hosted LLM via Ollama (on CPU) | Accepted |
+| [0016](0016-hybrid-bm25-knn-rag.md) | Hybrid BM25 + kNN search for RAG retrieval | Accepted |
+| [0017](0017-bastion-kubectl-es-access.md) | Mode A: bastion-kubectl ES log access (zero credential storage) | Accepted |
+| [0018](0018-adr-aware-chunking.md) | ADR-aware document chunking (keep architecture docs whole) | Accepted |
+| [0019](0019-incremental-repo-indexing.md) | Incremental repository indexing via SHA check | Accepted |
+| [0020](0020-multi-source-knowledge-index.md) | Multi-source knowledge indexing (Jira + Confluence + GitHub) | Accepted |
+
+---
+
+---
+
 ## Status values
 
 - **Proposed** — under discussion

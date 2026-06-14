@@ -21,6 +21,8 @@ searchly:
     host: ${OPENSEARCH_HOST:localhost}
     port: ${OPENSEARCH_PORT:9200}
     scheme: http
+  embedding:
+    url: ${EMBEDDING_SERVICE_URL:http://localhost:8083}
 
 management:
   endpoints:

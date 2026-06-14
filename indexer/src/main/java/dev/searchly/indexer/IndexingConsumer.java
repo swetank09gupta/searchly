@@ -13,54 +13,109 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Consumes indexing events and writes to OpenSearch.
  * Idempotent: doc_id is the OpenSearch document id (upsert semantics).
- * See ADR 0004.
+ *
+ * After writing the full document (keyword search), the content is also chunked,
+ * embedded, and written to the chunks-* index for RAG / semantic search.
+ * Embedding failures are non-fatal — the document remains keyword-searchable.
  */
 @Component
 public class IndexingConsumer {
     private static final Logger log = LoggerFactory.getLogger(IndexingConsumer.class);
 
     private final OpenSearchClient os;
+    private final ChunkingService chunker;
+    private final EmbeddingClient embedder;
+    private final ChunkIndexClient chunkIndex;
     private final Map<String, Boolean> ensuredIndices = new ConcurrentHashMap<>();
 
-    public IndexingConsumer(OpenSearchClient os) {
+    public IndexingConsumer(OpenSearchClient os,
+                            ChunkingService chunker,
+                            EmbeddingClient embedder,
+                            ChunkIndexClient chunkIndex) {
         this.os = os;
+        this.chunker = chunker;
+        this.embedder = embedder;
+        this.chunkIndex = chunkIndex;
     }
 
     @KafkaListener(topicPattern = "indexing\\.shared|indexing\\.enterprise\\..+", groupId = "indexer")
     public void onMessage(IndexingEvent event) {
         try {
-            String index = indexName(event);
+            String index = docIndexName(event);
             ensureIndex(index);
-
-            Map<String, Object> doc = new HashMap<>();
-            doc.put("tenant_id", event.tenantId());
-            doc.put("title", event.title());
-            doc.put("content", event.content());
-            doc.put("metadata", event.metadata());
-            doc.put("created_at", event.createdAt().toString());
-
-            os.index(IndexRequest.of(i -> i
-                    .index(index)
-                    .id(event.docId())
-                    .routing(event.tenantId())
-                    .document(doc)));
-            log.info("Indexed doc {} for tenant {} in {}", event.docId(), event.tenantId(), index);
+            indexFullDocument(index, event);
+            indexChunks(event);
         } catch (IOException e) {
             log.error("Failed to index {}: {}", event.docId(), e.getMessage(), e);
-            throw new RuntimeException(e); // triggers Kafka retry; DLQ after N attempts in prod
+            throw new RuntimeException(e);
         }
     }
 
-    private String indexName(IndexingEvent e) {
-        return e.tier() == Tier.ENTERPRISE
-                ? "documents-" + e.tenantId()
-                : "documents-shared";
+    private void indexFullDocument(String index, IndexingEvent event) throws IOException {
+        Map<String, Object> doc = new HashMap<>();
+        doc.put("tenant_id", event.tenantId());
+        doc.put("title", event.title());
+        doc.put("content", event.content());
+        doc.put("metadata", event.metadata());
+        doc.put("created_at", event.createdAt().toString());
+
+        os.index(IndexRequest.of(i -> i
+                .index(index)
+                .id(event.docId())
+                .routing(event.tenantId())
+                .document(doc)));
+        log.info("Indexed doc {} for tenant {} in {}", event.docId(), event.tenantId(), index);
+    }
+
+    private void indexChunks(IndexingEvent event) {
+        String fullText = buildTextForEmbedding(event);
+        List<String> chunks = chunker.chunk(fullText);
+        if (chunks.isEmpty()) return;
+
+        List<List<Double>> vectors = embedder.embed(chunks);
+        if (vectors.isEmpty()) {
+            log.warn("Embedding unavailable for doc {} — skipping chunk index", event.docId());
+            return;
+        }
+
+        String chunkIdx = chunkIndexName(event);
+        for (int i = 0; i < chunks.size(); i++) {
+            List<Double> vec = i < vectors.size() ? vectors.get(i) : null;
+            if (vec == null) continue;
+            chunkIndex.indexChunk(
+                    chunkIdx,
+                    event.tenantId(),
+                    event.docId(),
+                    i,
+                    event.title(),
+                    chunks.get(i),
+                    vec,
+                    event.metadata() != null ? event.metadata() : Map.of(),
+                    event.createdAt().toString());
+        }
+        log.info("Indexed {} chunks for doc {} in {}", chunks.size(), event.docId(), chunkIdx);
+    }
+
+    // Embed title + content together so the title context carries into each chunk's vector.
+    private String buildTextForEmbedding(IndexingEvent event) {
+        String title = event.title() != null ? event.title() : "";
+        String content = event.content() != null ? event.content() : "";
+        return title.isBlank() ? content : title + "\n\n" + content;
+    }
+
+    private String docIndexName(IndexingEvent e) {
+        return e.tier() == Tier.ENTERPRISE ? "documents-" + e.tenantId() : "documents-shared";
+    }
+
+    private String chunkIndexName(IndexingEvent e) {
+        return e.tier() == Tier.ENTERPRISE ? "chunks-" + e.tenantId() : "chunks-shared";
     }
 
     private void ensureIndex(String index) throws IOException {

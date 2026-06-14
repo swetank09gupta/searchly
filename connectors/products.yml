@@ -1,0 +1,104 @@
+# Product Registry
+#
+# Defines how repos map to product names and how pod names map to products.
+#
+# Used by TWO components:
+#   1. sync.py (RepoIndexer) — discovers and indexes repos from the GitHub org
+#   2. intelligence-agent (tools.py) — maps pod name prefixes to products for
+#      targeted log fetching when a customer asks about a specific service
+#
+# ── Repo indexing is AUTOMATIC ───────────────────────────────────────────────
+#
+#   Set github_org below + GIT_TOKEN in connectors/.env and ALL repos in the
+#   org are indexed automatically — no manual listing required.
+#
+#   This file is optional.  It is used for:
+#     • skip_repos  — repos to never index (forks, marketing sites, etc.)
+#     • products    — to tag repos with a product name and control priority
+#     • pod_prefixes — so the agent knows which pods belong to which product
+#
+# ── Field reference ──────────────────────────────────────────────────────────
+#
+#   github_org: your-org        # GitHub organisation that owns the repos
+#
+#   skip_repos:                 # repo names to always skip
+#     - oss-fork
+#
+#   products:
+#     <product-name>:
+#       description: "..."      # shown in agent context
+#       priority: high          # high | medium | low
+#                               #   high   — always indexed (default)
+#                               #   medium — indexed but skipped on --fast runs
+#                               #   low    — docs-only (.md, .txt, .yml)
+#       jira_projects:          # (optional) Jira project keys for this product
+#         - PROJ
+#       pod_prefixes:           # k8s pod name prefixes → used for live log queries
+#         - api-server
+#         - worker
+#       repos:                  # (OPTIONAL) explicit repo list for this product
+#         - repo-name           # if omitted, repos are tagged by GitHub topic
+#
+# ── Tips ─────────────────────────────────────────────────────────────────────
+#   Run `python sync.py --list-repos` to see all repos in the org.
+#   Repos not listed under any product are tagged with their first GitHub topic
+#   (or "unclassified" if they have no topics).
+#   GIT_TOKEN in connectors/.env is required for private repos.
+# ─────────────────────────────────────────────────────────────────────────────
+
+github_org: your-org    # ← replace with your GitHub organisation name
+
+products:
+
+  # ── EXAMPLE: Backend / API ──────────────────────────────────────────────────
+  # backend:
+  #   description: "Core API services and business logic"
+  #   priority: high
+  #   jira_projects:
+  #     - ENG
+  #     - API
+  #   pod_prefixes:
+  #     - api-server
+  #     - worker
+  #     - scheduler
+  #   repos:
+  #     - api-service
+  #     - worker-service
+  #     - shared-libs
+
+  # ── EXAMPLE: Infrastructure / Platform ──────────────────────────────────────
+  # platform:
+  #   description: "Infrastructure, deployment, and platform tooling"
+  #   priority: high
+  #   jira_projects:
+  #     - INFRA
+  #     - PLATFORM
+  #   pod_prefixes:
+  #     - platform-
+  #     - infra-
+  #   repos:
+  #     - helm-charts
+  #     - terraform-modules
+  #     - platform-tools
+
+  # ── EXAMPLE: Frontend ────────────────────────────────────────────────────────
+  # frontend:
+  #   description: "Web and mobile applications"
+  #   priority: medium
+  #   jira_projects:
+  #     - FE
+  #   pod_prefixes:
+  #     - frontend
+  #     - web-
+  #   repos:
+  #     - web-app
+  #     - mobile-app
+  #     - design-system
+
+  # ── ADD YOUR PRODUCTS BELOW ──────────────────────────────────────────────────
+
+# Repos to never index (forks of OSS projects, marketing sites, binary-heavy repos, etc.)
+skip_repos: []
+  # - oss-fork
+  # - company-website
+  # - large-binary-repo

@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GreyOrange Warehouse Intelligence</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@9/marked.min.js"></script>
+  <style>
+    /* Markdown content inside agent bubbles */
+    .md-body { line-height: 1.65; }
+    .md-body p  { margin-bottom: 0.6em; }
+    .md-body p:last-child { margin-bottom: 0; }
+    .md-body ul, .md-body ol { margin: 0.4em 0 0.6em 1.4em; }
+    .md-body li { margin-bottom: 0.25em; }
+    .md-body h1,.md-body h2,.md-body h3 { font-weight: 600; margin: 0.8em 0 0.3em; }
+    .md-body h1 { font-size: 1.1em; }
+    .md-body h2 { font-size: 1.05em; }
+    .md-body h3 { font-size: 1em; }
+    .md-body code {
+      background: #f1f5f9; border: 1px solid #e2e8f0;
+      border-radius: 4px; padding: 1px 5px;
+      font-family: 'Fira Code', 'Consolas', monospace;
+      font-size: 0.85em;
+    }
+    .md-body pre {
+      background: #0f172a; border-radius: 8px;
+      padding: 1em; overflow-x: auto; margin: 0.6em 0;
+    }
+    .md-body pre code {
+      background: none; border: none; padding: 0;
+      color: #e2e8f0; font-size: 0.83em;
+    }
+    .md-body table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.9em; }
+    .md-body th { background: #f1f5f9; }
+    .md-body th, .md-body td { border: 1px solid #e2e8f0; padding: 5px 10px; text-align: left; }
+    .md-body blockquote {
+      border-left: 3px solid #f97316; padding-left: 0.8em;
+      color: #64748b; margin: 0.5em 0;
+    }
+    .md-body strong { font-weight: 600; }
+    .md-body a { color: #3b82f6; text-decoration: underline; }
+
+    /* Typing dots */
+    @keyframes blink { 0%,80%,100% { opacity: 0.2; } 40% { opacity: 1; } }
+    .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+           background: #94a3b8; animation: blink 1.4s infinite both; }
+    .dot:nth-child(2) { animation-delay: 0.2s; }
+    .dot:nth-child(3) { animation-delay: 0.4s; }
+
+    /* Textarea auto-grow */
+    textarea { resize: none; overflow-y: hidden; }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+
+    /* Session item active */
+    .session-active { background: #1e293b !important; }
+  </style>
+</head>
+<body class="bg-slate-50 h-screen flex overflow-hidden" style="font-family:system-ui,-apple-system,sans-serif">
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     API KEY MODAL
+════════════════════════════════════════════════════════════════════════════ -->
+<div id="keyModal" class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 hidden">
+  <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full mx-4">
+    <div class="flex items-center gap-3 mb-6">
+      <div class="w-10 h-10 bg-orange-500 rounded-xl flex items-center justify-center text-white font-bold text-lg">GO</div>
+      <div>
+        <h2 class="text-lg font-semibold text-slate-800">Enter API Key</h2>
+        <p class="text-sm text-slate-500">Required to access warehouse data</p>
+      </div>
+    </div>
+    <input id="keyInput" type="password" placeholder="sk-go-..."
+      class="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 focus:border-transparent mb-3"
+      onkeydown="if(event.key==='Enter') saveKey()">
+    <div id="keyError" class="text-red-500 text-xs mb-3 hidden">Invalid API key — please try again.</div>
+    <button onclick="saveKey()"
+      class="w-full bg-orange-500 hover:bg-orange-600 text-white font-medium py-3 rounded-xl transition-colors">
+      Continue
+    </button>
+    <p class="text-center text-xs text-slate-400 mt-3">
+      Get your key from your GreyOrange administrator
+    </p>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     LAYOUT
+════════════════════════════════════════════════════════════════════════════ -->
+<div class="flex w-full h-full">
+
+  <!-- ── SIDEBAR ──────────────────────────────────────────────────────────── -->
+  <aside class="w-64 bg-slate-900 text-white flex flex-col flex-shrink-0 select-none">
+
+    <!-- Logo -->
+    <div class="px-4 py-5 border-b border-slate-700/60 flex items-center gap-3">
+      <div class="w-9 h-9 bg-orange-500 rounded-lg flex items-center justify-center font-bold text-white text-base flex-shrink-0">GO</div>
+      <div class="min-w-0">
+        <div class="text-sm font-semibold tracking-tight text-white truncate">GreyOrange</div>
+        <div class="text-xs text-slate-400 truncate">Warehouse Intelligence</div>
+      </div>
+    </div>
+
+    <!-- New Chat -->
+    <div class="p-3">
+      <button onclick="newSession()"
+        class="w-full bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium py-2.5 px-4 rounded-xl transition-colors flex items-center justify-center gap-2">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+        </svg>
+        New Chat
+      </button>
+    </div>
+
+    <!-- Session list -->
+    <div class="text-xs text-slate-500 px-4 py-1 font-medium uppercase tracking-wider">Recent</div>
+    <div id="sessionList" class="flex-1 overflow-y-auto px-2 pb-2 space-y-0.5"></div>
+
+    <!-- Footer -->
+    <div class="p-3 border-t border-slate-700/60 space-y-1">
+      <button onclick="showKeyModal()"
+        class="w-full text-left text-xs text-slate-400 hover:text-slate-200 flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-800 transition-colors">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+        </svg>
+        API Key
+      </button>
+      <div id="authStatus" class="text-xs text-slate-600 px-2"></div>
+    </div>
+  </aside>
+
+  <!-- ── MAIN ────────────────────────────────────────────────────────────── -->
+  <main class="flex-1 flex flex-col min-w-0 overflow-hidden">
+
+    <!-- Header -->
+    <header class="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-4 flex-shrink-0">
+      <h1 class="text-sm font-semibold text-slate-700 flex-1">Warehouse Intelligence Chat</h1>
+
+      <!-- Context badges (shown once customer is resolved) -->
+      <div id="contextBadges" class="flex items-center gap-2 hidden">
+        <span id="customerBadge"
+          class="text-xs font-medium bg-blue-100 text-blue-700 px-2.5 py-1 rounded-full flex items-center gap-1">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+          </svg>
+          <span id="customerBadgeText"></span>
+        </span>
+        <span id="envBadge" class="text-xs font-medium px-2.5 py-1 rounded-full"></span>
+        <span id="stageBadge" class="text-xs font-medium px-2.5 py-1 rounded-full"></span>
+        <span id="liveBadge"
+          class="text-xs font-medium bg-green-100 text-green-700 px-2.5 py-1 rounded-full items-center gap-1 hidden">
+          <span class="w-1.5 h-1.5 bg-green-500 rounded-full inline-block animate-pulse"></span>
+          Live
+        </span>
+      </div>
+    </header>
+
+    <!-- Messages -->
+    <div id="messages" class="flex-1 overflow-y-auto px-6 py-6">
+
+      <!-- Welcome state (hidden once first message sent) -->
+      <div id="welcome" class="h-full flex flex-col items-center justify-center text-center max-w-lg mx-auto gap-6">
+        <div class="w-16 h-16 bg-orange-100 rounded-2xl flex items-center justify-center">
+          <svg class="w-8 h-8 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/>
+          </svg>
+        </div>
+        <div>
+          <h2 class="text-xl font-semibold text-slate-800 mb-2">What's happening in your warehouse?</h2>
+          <p class="text-sm text-slate-500 leading-relaxed">
+            Ask me anything — robot status, order tracking, task allocation, deployment versions.
+            I'll figure out the customer and environment from your question.
+          </p>
+        </div>
+        <div class="grid grid-cols-2 gap-2 w-full text-left">
+          <button onclick="prefill('Why is robot 42 not moving in samsclub atl prod?')"
+            class="text-xs bg-white border border-slate-200 rounded-xl px-3 py-3 hover:bg-slate-50 hover:border-slate-300 transition-colors text-slate-600 text-left">
+            🤖 Why is robot 42 not moving in samsclub atl prod?
+          </button>
+          <button onclick="prefill('Where is order ORD-9182 right now?')"
+            class="text-xs bg-white border border-slate-200 rounded-xl px-3 py-3 hover:bg-slate-50 hover:border-slate-300 transition-colors text-slate-600 text-left">
+            📦 Where is order ORD-9182 right now?
+          </button>
+          <button onclick="prefill('Why did order A get picked before order B?')"
+            class="text-xs bg-white border border-slate-200 rounded-xl px-3 py-3 hover:bg-slate-50 hover:border-slate-300 transition-colors text-slate-600 text-left">
+            ⚖️ Why did order A get picked before order B?
+          </button>
+          <button onclick="prefill('What version of pick-assist is running in staging?')"
+            class="text-xs bg-white border border-slate-200 rounded-xl px-3 py-3 hover:bg-slate-50 hover:border-slate-300 transition-colors text-slate-600 text-left">
+            🚀 What version of pick-assist is in staging?
+          </button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Input -->
+    <div class="bg-white border-t border-slate-200 px-6 py-4 flex-shrink-0">
+      <div class="max-w-3xl mx-auto flex gap-3 items-end">
+        <div class="flex-1 border border-slate-200 rounded-2xl focus-within:ring-2 focus-within:ring-orange-400 focus-within:border-transparent bg-white overflow-hidden transition-all">
+          <textarea id="input" rows="1"
+            placeholder="Ask anything about your warehouse operations…"
+            class="w-full px-4 py-3 text-sm text-slate-800 placeholder-slate-400 focus:outline-none bg-transparent"
+            onkeydown="handleKey(event)" oninput="autoGrow(this)"></textarea>
+        </div>
+        <button id="sendBtn" onclick="sendMessage()"
+          class="bg-orange-500 hover:bg-orange-600 disabled:bg-slate-200 disabled:cursor-not-allowed text-white p-3 rounded-xl transition-colors flex-shrink-0"
+          title="Send (Enter)">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+          </svg>
+        </button>
+      </div>
+      <div class="max-w-3xl mx-auto mt-1.5 text-xs text-slate-400 text-center">
+        Enter to send · Shift+Enter for new line
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════════
+     JAVASCRIPT
+════════════════════════════════════════════════════════════════════════════ -->
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+const API_BASE = window.location.origin;
+
+let state = {
+  apiKey:    localStorage.getItem('go_api_key') || '',
+  authEnabled: false,        // fetched from server
+  sessions:  [],             // [{id, serverSessionId, title, messages, context, updatedAt}]
+  currentId: null,           // local session UUID
+  loading:   false,
+};
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+async function init() {
+  state.sessions = JSON.parse(localStorage.getItem('go_sessions') || '[]');
+
+  // Ask server if auth is required
+  try {
+    const cfg = await fetch(`${API_BASE}/api/v1/config`).then(r => r.json());
+    state.authEnabled = cfg.auth_enabled || false;
+  } catch {}
+
+  if (state.authEnabled && !state.apiKey) {
+    showKeyModal();
+  }
+
+  // Restore last session or create new
+  const lastId = localStorage.getItem('go_last_session');
+  const last = state.sessions.find(s => s.id === lastId);
+  if (last) {
+    loadSession(last.id);
+  } else {
+    newSession(false);
+  }
+
+  renderSessionList();
+  document.getElementById('input').focus();
+
+  if (state.authEnabled) {
+    document.getElementById('authStatus').textContent = 'Auth: on';
+  }
+}
+
+// ─── Session management ───────────────────────────────────────────────────────
+function uuid() { return crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2); }
+
+function newSession(render = true) {
+  const s = {
+    id:              uuid(),
+    serverSessionId: null,
+    title:           'New conversation',
+    messages:        [],
+    context:         {},
+    updatedAt:       Date.now(),
+  };
+  state.sessions.unshift(s);
+  state.currentId = s.id;
+  saveSessions();
+  if (render) {
+    renderMessages([]);
+    renderSessionList();
+    clearContextBadges();
+    document.getElementById('welcome').classList.remove('hidden');
+    document.getElementById('input').focus();
+  }
+}
+
+function currentSession() { return state.sessions.find(s => s.id === state.currentId); }
+
+function loadSession(id) {
+  state.currentId = id;
+  localStorage.setItem('go_last_session', id);
+  const s = currentSession();
+  if (!s) return;
+  renderMessages(s.messages);
+  updateContextBadges(s.context);
+  renderSessionList();
+  if (s.messages.length > 0) {
+    document.getElementById('welcome').classList.add('hidden');
+  } else {
+    document.getElementById('welcome').classList.remove('hidden');
+  }
+  scrollToBottom();
+}
+
+function saveSessions() {
+  // Keep last 40 sessions, trim messages to last 80 per session to stay under localStorage quota
+  const trimmed = state.sessions.slice(0, 40).map(s => ({
+    ...s,
+    messages: s.messages.slice(-80),
+  }));
+  try { localStorage.setItem('go_sessions', JSON.stringify(trimmed)); } catch {}
+  localStorage.setItem('go_last_session', state.currentId);
+}
+
+// ─── Send message ─────────────────────────────────────────────────────────────
+async function sendMessage() {
+  const input = document.getElementById('input');
+  const text = input.value.trim();
+  if (!text || state.loading) return;
+
+  const s = currentSession();
+  if (!s) return;
+
+  // Hide welcome screen
+  document.getElementById('welcome').classList.add('hidden');
+
+  // Optimistically add user message
+  const userMsg = { role: 'user', content: text, ts: Date.now() };
+  s.messages.push(userMsg);
+  if (s.title === 'New conversation') {
+    s.title = text.length > 50 ? text.slice(0, 47) + '…' : text;
+  }
+  s.updatedAt = Date.now();
+  saveSessions();
+  renderMessages(s.messages);
+  input.value = '';
+  autoGrow(input);
+  scrollToBottom();
+  renderSessionList();
+
+  // Typing indicator
+  state.loading = true;
+  setInputEnabled(false);
+  const typingEl = addTypingIndicator();
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (state.apiKey) headers['X-API-Key'] = state.apiKey;
+
+    const body = {
+      message:    text,
+      session_id: s.serverSessionId || null,
+    };
+
+    const resp = await fetch(`${API_BASE}/api/v1/chat`, {
+      method:  'POST',
+      headers,
+      body:    JSON.stringify(body),
+    });
+
+    typingEl.remove();
+
+    if (resp.status === 401) {
+      addErrorMessage('Invalid API key. Please update it in the sidebar.');
+      if (state.authEnabled) showKeyModal();
+      return;
+    }
+    if (resp.status === 403) {
+      addErrorMessage('You don\'t have access to that customer\'s data.');
+      return;
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ detail: resp.statusText }));
+      addErrorMessage(`Error ${resp.status}: ${err.detail || resp.statusText}`);
+      return;
+    }
+
+    const data = await resp.json();
+
+    // Persist server session ID for multi-turn
+    s.serverSessionId = data.session_id;
+
+    // Store context on session
+    if (data.resolved_customer) {
+      s.context = {
+        customer:   data.resolved_customer,
+        env:        data.resolved_env,
+        stage:      data.lifecycle_stage,
+        stageLabel: data.lifecycle_label,
+        hasLiveData: data.has_live_data,
+      };
+    }
+
+    const agentMsg = {
+      role:             'agent',
+      content:          data.answer,
+      clarification:    data.needs_clarification,
+      toolsCalled:      data.tools_called || [],
+      isOperational:    data.is_operational,
+      hasLiveData:      data.has_live_data,
+      resolvedCustomer: data.resolved_customer,
+      resolvedEnv:      data.resolved_env,
+      stage:            data.lifecycle_stage,
+      ts:               Date.now(),
+    };
+    s.messages.push(agentMsg);
+    s.updatedAt = Date.now();
+    saveSessions();
+    renderMessages(s.messages);
+    updateContextBadges(s.context);
+    scrollToBottom();
+    renderSessionList();
+
+  } catch (err) {
+    typingEl.remove();
+    addErrorMessage('Could not reach the server. Is it running?');
+    console.error(err);
+  } finally {
+    state.loading = false;
+    setInputEnabled(true);
+    document.getElementById('input').focus();
+  }
+}
+
+// ─── Render messages ──────────────────────────────────────────────────────────
+function renderMessages(messages) {
+  const container = document.getElementById('messages');
+  // Remove all messages but keep welcome div
+  container.querySelectorAll('.msg-row').forEach(el => el.remove());
+
+  for (const msg of messages) {
+    container.appendChild(buildMessage(msg));
+  }
+}
+
+function buildMessage(msg) {
+  const row = document.createElement('div');
+  row.className = 'msg-row flex gap-3 max-w-3xl mx-auto mb-4';
+
+  if (msg.role === 'user') {
+    row.classList.add('justify-end');
+    row.innerHTML = `
+      <div class="max-w-[78%] bg-blue-500 text-white text-sm px-4 py-3 rounded-2xl rounded-tr-md shadow-sm whitespace-pre-wrap break-words">
+        ${escHtml(msg.content)}
+      </div>
+    `;
+  } else {
+    // Avatar
+    const avatarColor = msg.clarification ? 'bg-amber-100' : 'bg-slate-100';
+    const avatarIcon  = msg.clarification
+      ? '❓'
+      : `<svg class="w-4 h-4 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+             d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.35A3.001 3.001 0 0112 21a3 3 0 01-2.12-.88l-.346-.349z"/>
+         </svg>`;
+
+    // Bubble border for clarification questions
+    const bubbleClass = msg.clarification
+      ? 'bg-amber-50 border border-amber-200 shadow-sm'
+      : 'bg-white border border-slate-200 shadow-sm';
+
+    // Tools used badge
+    let toolsBadge = '';
+    if (msg.toolsCalled && msg.toolsCalled.length) {
+      const toolNames = msg.toolsCalled.map(t => `<code class="text-slate-500 text-xs">${escHtml(t)}</code>`).join(' · ');
+      toolsBadge = `
+        <details class="mt-2 text-xs">
+          <summary class="text-slate-400 hover:text-slate-600 cursor-pointer select-none">
+            🔧 Tools used (${msg.toolsCalled.length})
+          </summary>
+          <div class="mt-1 pl-2">${toolNames}</div>
+        </details>`;
+    }
+
+    // Live badge
+    const liveBadge = msg.hasLiveData
+      ? `<span class="inline-flex items-center gap-1 text-xs text-green-600 font-medium ml-2">
+           <span class="w-1.5 h-1.5 bg-green-500 rounded-full inline-block"></span>Live data
+         </span>`
+      : '';
+
+    row.innerHTML = `
+      <div class="w-8 h-8 ${avatarColor} rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 text-base">
+        ${avatarIcon}
+      </div>
+      <div class="flex-1 min-w-0">
+        ${msg.clarification ? '<div class="text-xs font-medium text-amber-600 mb-1">Needs clarification</div>' : ''}
+        <div class="${bubbleClass} text-sm text-slate-800 px-4 py-3 rounded-2xl rounded-tl-md">
+          <div class="md-body">${renderMd(msg.content)}</div>
+          ${liveBadge}
+          ${toolsBadge}
+        </div>
+      </div>
+    `;
+  }
+  return row;
+}
+
+function addTypingIndicator() {
+  const container = document.getElementById('messages');
+  const el = document.createElement('div');
+  el.className = 'msg-row flex gap-3 max-w-3xl mx-auto mb-4';
+  el.innerHTML = `
+    <div class="w-8 h-8 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0">
+      <svg class="w-4 h-4 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.35A3.001 3.001 0 0112 21a3 3 0 01-2.12-.88l-.346-.349z"/>
+      </svg>
+    </div>
+    <div class="bg-white border border-slate-200 rounded-2xl rounded-tl-md px-4 py-3 shadow-sm">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    </div>`;
+  container.appendChild(el);
+  scrollToBottom();
+  return el;
+}
+
+function addErrorMessage(text) {
+  const container = document.getElementById('messages');
+  const el = document.createElement('div');
+  el.className = 'msg-row max-w-3xl mx-auto mb-4';
+  el.innerHTML = `
+    <div class="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded-2xl">
+      ⚠️ ${escHtml(text)}
+    </div>`;
+  container.appendChild(el);
+  scrollToBottom();
+}
+
+// ─── Context badges ───────────────────────────────────────────────────────────
+const STAGE_COLORS = {
+  solution: 'bg-slate-100 text-slate-600',
+  dev:      'bg-blue-100 text-blue-700',
+  testing:  'bg-yellow-100 text-yellow-700',
+  staging:  'bg-orange-100 text-orange-700',
+  prod:     'bg-red-100 text-red-700',
+};
+const ENV_COLORS = {
+  dev:     'bg-blue-50 text-blue-600',
+  testing: 'bg-yellow-50 text-yellow-700',
+  staging: 'bg-orange-50 text-orange-700',
+  prod:    'bg-red-50 text-red-700',
+};
+
+function updateContextBadges(ctx) {
+  if (!ctx || !ctx.customer) { clearContextBadges(); return; }
+  document.getElementById('contextBadges').classList.remove('hidden');
+  document.getElementById('customerBadgeText').textContent = ctx.customer;
+  const envBadge = document.getElementById('envBadge');
+  if (ctx.env) {
+    envBadge.textContent = ctx.env;
+    envBadge.className = `text-xs font-medium px-2.5 py-1 rounded-full ${ENV_COLORS[ctx.env] || 'bg-slate-100 text-slate-600'}`;
+    envBadge.classList.remove('hidden');
+  } else {
+    envBadge.classList.add('hidden');
+  }
+  const stageBadge = document.getElementById('stageBadge');
+  if (ctx.stageLabel || ctx.stage) {
+    stageBadge.textContent = ctx.stageLabel || ctx.stage;
+    stageBadge.className = `text-xs font-medium px-2.5 py-1 rounded-full ${STAGE_COLORS[ctx.stage] || 'bg-slate-100 text-slate-600'}`;
+    stageBadge.classList.remove('hidden');
+  } else {
+    stageBadge.classList.add('hidden');
+  }
+  const liveBadge = document.getElementById('liveBadge');
+  if (ctx.hasLiveData) {
+    liveBadge.classList.remove('hidden');
+    liveBadge.classList.add('flex');
+  } else {
+    liveBadge.classList.add('hidden');
+    liveBadge.classList.remove('flex');
+  }
+}
+
+function clearContextBadges() {
+  document.getElementById('contextBadges').classList.add('hidden');
+}
+
+// ─── Session list sidebar ─────────────────────────────────────────────────────
+function renderSessionList() {
+  const list = document.getElementById('sessionList');
+  list.innerHTML = '';
+  if (state.sessions.length === 0) {
+    list.innerHTML = '<div class="text-xs text-slate-600 px-3 py-2 italic">No conversations yet</div>';
+    return;
+  }
+  for (const s of state.sessions) {
+    const isActive = s.id === state.currentId;
+    const el = document.createElement('button');
+    el.className = `w-full text-left px-3 py-2.5 rounded-xl transition-colors hover:bg-slate-800 ${isActive ? 'session-active' : ''}`;
+    const timeAgo = fmtAge(s.updatedAt);
+    const customerBit = s.context?.customer
+      ? `<span class="text-orange-400/80">${escHtml(s.context.customer.replace(/-/g, ' '))}</span> · `
+      : '';
+    el.innerHTML = `
+      <div class="text-xs font-medium text-slate-200 truncate">${escHtml(s.title)}</div>
+      <div class="text-xs text-slate-500 mt-0.5 truncate">${customerBit}${timeAgo}</div>`;
+    el.onclick = () => loadSession(s.id);
+    list.appendChild(el);
+  }
+}
+
+// ─── API key modal ────────────────────────────────────────────────────────────
+function showKeyModal() {
+  const modal = document.getElementById('keyModal');
+  modal.classList.remove('hidden');
+  document.getElementById('keyInput').value = state.apiKey;
+  document.getElementById('keyInput').focus();
+}
+
+async function saveKey() {
+  const key = document.getElementById('keyInput').value.trim();
+  document.getElementById('keyError').classList.add('hidden');
+
+  if (!key) {
+    document.getElementById('keyError').classList.remove('hidden');
+    document.getElementById('keyError').textContent = 'Please enter an API key.';
+    return;
+  }
+
+  // Validate key against server
+  try {
+    const resp = await fetch(`${API_BASE}/api/v1/config`, {
+      headers: { 'X-API-Key': key }
+    });
+    if (resp.status === 401) {
+      document.getElementById('keyError').classList.remove('hidden');
+      document.getElementById('keyError').textContent = 'Invalid API key — please try again.';
+      return;
+    }
+  } catch {}
+
+  state.apiKey = key;
+  localStorage.setItem('go_api_key', key);
+  document.getElementById('keyModal').classList.add('hidden');
+}
+
+// ─── Input handling ───────────────────────────────────────────────────────────
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 180) + 'px';
+}
+
+function setInputEnabled(enabled) {
+  const input   = document.getElementById('input');
+  const sendBtn = document.getElementById('sendBtn');
+  input.disabled  = !enabled;
+  sendBtn.disabled = !enabled;
+}
+
+function prefill(text) {
+  const input = document.getElementById('input');
+  input.value = text;
+  autoGrow(input);
+  input.focus();
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+function scrollToBottom() {
+  const messages = document.getElementById('messages');
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderMd(text) {
+  try {
+    return marked.parse(text, { breaks: true, gfm: true });
+  } catch {
+    return `<p>${escHtml(text)}</p>`;
+  }
+}
+
+function fmtAge(ts) {
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60)   return 'just now';
+  if (sec < 3600) return `${Math.floor(sec/60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec/3600)}h ago`;
+  return `${Math.floor(sec/86400)}d ago`;
+}
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

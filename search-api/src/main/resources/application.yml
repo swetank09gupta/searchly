@@ -40,6 +40,15 @@ searchly:
   kafka:
     topic-shared: indexing.shared
     topic-enterprise-prefix: indexing.enterprise.
+  embedding:
+    url: ${EMBEDDING_SERVICE_URL:http://localhost:8083}
+  ollama:
+    url: ${OLLAMA_URL:http://localhost:11434}
+    model: ${OLLAMA_MODEL:llama3.2:3b}
+  # Python warehouse agent — handles live operational queries (kubectl logs, deployment state)
+  # Leave blank to disable and use static RAG only.
+  warehouse-agent:
+    url: ${WAREHOUSE_AGENT_URL:}
 
 management:
   endpoints:

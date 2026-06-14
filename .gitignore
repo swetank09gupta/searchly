@@ -39,9 +39,10 @@ Thumbs.db
 *.log
 logs/
 
-# Env / secrets
+# Env / secrets — never commit real credentials
 .env
 .env.local
+connectors/.env
 *.pem
 *.key
 
@@ -60,3 +61,5 @@ volumes/
 
 # Assignment artifacts (not for public repo)
 Requirements.pdf
+**/__pycache__/
+**/*.pyc

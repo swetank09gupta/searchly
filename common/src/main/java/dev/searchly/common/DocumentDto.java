@@ -45,6 +45,33 @@ public class DocumentDto {
             int page,
             int size,
             java.util.List<SearchHit> hits,
-            Map<String, Map<String, Long>> facets
-    ) {}
+            Map<String, Map<String, Long>> facets,
+            String  answer,               // LLM-generated answer (always present)
+            java.util.List<String> sources,  // chunk IDs or "live:tool_name"
+            // ── Conversational / multi-tenant fields ──────────────────────────
+            String  sessionId,            // pass this back in subsequent requests
+            boolean needsClarification,   // if true, answer IS a question for the user
+            String  resolvedCustomer,     // which customer was identified
+            String  resolvedEnv,          // which env was queried (dev/prod/etc.)
+            String  lifecycleStage,       // solution | dev | testing | staging | prod
+            String  lifecycleLabel,       // human-readable lifecycle label
+            boolean hasLiveData           // true if live cluster was queried
+    ) {
+        // Backward-compatible constructor for callers that predate RAG
+        public SearchResponse(long took, long total, int page, int size,
+                              java.util.List<SearchHit> hits,
+                              Map<String, Map<String, Long>> facets) {
+            this(took, total, page, size, hits, facets,
+                 null, null, null, false, null, null, null, null, false);
+        }
+
+        // Constructor for static RAG answers (no live data)
+        public SearchResponse(long took, long total, int page, int size,
+                              java.util.List<SearchHit> hits,
+                              Map<String, Map<String, Long>> facets,
+                              String answer, java.util.List<String> sources) {
+            this(took, total, page, size, hits, facets,
+                 answer, sources, null, false, null, null, null, null, false);
+        }
+    }
 }

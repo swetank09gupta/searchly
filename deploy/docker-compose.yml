@@ -30,6 +30,7 @@ services:
       - DISABLE_SECURITY_PLUGIN=true
       - bootstrap.memory_lock=true
       - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - plugins.knn.enabled=true
     ulimits:
       memlock: { soft: -1, hard: -1 }
     ports: ["9200:9200"]
@@ -63,6 +64,82 @@ services:
       timeout: 5s
       retries: 30
 
+  # Sentence-transformers sidecar — all-MiniLM-L6-v2, CPU-only, ~1.5 GB image.
+  # Model is baked into the image at build time so first startup is instant.
+  embedding-service:
+    build:
+      context: ../embedding-service
+      dockerfile: Dockerfile
+    ports: ["8083:8083"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Ollama — model is pulled once on first start and persisted in the named volume.
+  # Subsequent starts skip the download and serve immediately.
+  ollama:
+    build:
+      context: ./ollama
+      dockerfile: Dockerfile
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+    ports: ["11434:11434"]
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # Warehouse Intelligence Agent — answers live operational queries per customer lifecycle.
+  #
+  # Management API (port 8084):
+  #   POST   /api/v1/customers                         register new customer (solution phase)
+  #   GET    /api/v1/customers                         list all
+  #   POST   /api/v1/customers/{id}/environments/{env} add cluster env (dev/test/staging/prod)
+  #   DELETE /api/v1/customers/{id}/environments/{env} remove env
+  #
+  # The answer endpoint is called by search-api (not directly by users):
+  #   POST   /api/v1/agent/answer
+  warehouse-agent:
+    build:
+      context: ../warehouse-agent
+      dockerfile: Dockerfile
+    environment:
+      OLLAMA_URL:      http://ollama:11434
+      OLLAMA_MODEL:    ${OLLAMA_MODEL:-llama3.2:3b}
+      SEARCHLY_URL:    http://gateway:8080
+      SEARCHLY_TENANT: ${SEARCHLY_TENANT:-greyorange}
+      CUSTOMERS_YML:   /app/customers.yml           # imported once at startup
+      CUSTOMERS_DB:    /app/data/customers_db.json  # live persistent registry
+      AUTH_DB:         /app/data/auth_db.json       # API key store
+      PRODUCTS_YML:    /app/products.yml            # canonical product list (read-only)
+      # AUTH_ENABLED: "false"  ← default: no auth, open access (good for internal/dev)
+      # AUTH_ENABLED: "true"   ← enable tenant isolation (required for customer-facing)
+      AUTH_ENABLED:    ${AUTH_ENABLED:-false}
+      # ADMIN_API_KEY: set this to a fixed key, otherwise one is auto-generated
+      # and printed to the logs on first start (docker compose logs warehouse-agent)
+      ADMIN_API_KEY:   ${ADMIN_API_KEY:-}
+    volumes:
+      # Read-only seed: imported once at startup
+      - ../connectors/customers.yml:/app/customers.yml:ro
+      - ../connectors/products.yml:/app/products.yml:ro
+      # Read-write persistent registry: survives restarts, updated via API
+      - warehouse-agent-data:/app/data
+      # SSH key for kubectl bastion access (mount your actual key)
+      - ${SSH_KEY_PATH:-~/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
+    ports: ["8084:8084"]
+    depends_on:
+      ollama: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8084/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   search-api:
     build:
       context: ..
@@ -74,12 +151,20 @@ services:
       REDIS_HOST: redis
       KAFKA_BOOTSTRAP: kafka:9092
       OPENSEARCH_HOST: opensearch
+      EMBEDDING_SERVICE_URL: http://embedding-service:8083
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      # Warehouse agent URL — enables live operational query routing
+      WAREHOUSE_AGENT_URL: http://warehouse-agent:8084
     ports: ["8081:8081"]
     depends_on:
-      postgres: { condition: service_healthy }
-      redis:    { condition: service_healthy }
-      opensearch: { condition: service_healthy }
-      kafka:    { condition: service_healthy }
+      postgres:          { condition: service_healthy }
+      redis:             { condition: service_healthy }
+      opensearch:        { condition: service_healthy }
+      kafka:             { condition: service_healthy }
+      embedding-service: { condition: service_healthy }
+      ollama:            { condition: service_healthy }
+      warehouse-agent:   { condition: service_healthy }
 
   indexer:
     build:
@@ -88,9 +173,11 @@ services:
     environment:
       KAFKA_BOOTSTRAP: kafka:9092
       OPENSEARCH_HOST: opensearch
+      EMBEDDING_SERVICE_URL: http://embedding-service:8083
     depends_on:
-      opensearch: { condition: service_healthy }
-      kafka:    { condition: service_healthy }
+      opensearch:        { condition: service_healthy }
+      kafka:             { condition: service_healthy }
+      embedding-service: { condition: service_healthy }
 
   gateway:
     build:
@@ -104,6 +191,52 @@ services:
       redis:      { condition: service_healthy }
       search-api: { condition: service_started }
 
+  # ── Automatic sync scheduler ──────────────────────────────────────────────
+  # Runs automatically on `docker compose up -d`.
+  # Two tracks:
+  #   A. Customer logs + deployment state  — every SYNC_CUSTOMER_INTERVAL_MIN (default: 5)
+  #   B. Full shared sync (Jira + Confluence + repos) — every SYNC_FULL_INTERVAL_HOURS (default: 4)
+  # On first start: waits for search-api, then immediately runs a full sync.
+  #
+  # Watch live: docker compose logs sync-cron -f
+  sync-cron:
+    build:
+      context: ../connectors
+      dockerfile: Dockerfile
+    command: ["python", "scheduler.py"]
+    env_file:
+      - ../connectors/.env
+    environment:
+      SEARCHLY_URL:               http://search-api:8081
+      SYNC_DEPLOY_INTERVAL_MIN:   ${SYNC_DEPLOY_INTERVAL_MIN:-60}   # deployment state refresh
+      SYNC_FULL_INTERVAL_HOURS:   ${SYNC_FULL_INTERVAL_HOURS:-4}    # Jira + Confluence + repos
+      # SYNC_STARTUP_WAIT_SEC:    90    # grace period before very first sync
+    volumes:
+      # .sync_state.json persists here so incremental indexing survives restarts
+      - sync-state:/app
+    depends_on:
+      search-api: { condition: service_started }
+    restart: unless-stopped
+
+  # ── Manual / one-shot sync ────────────────────────────────────────────────
+  # Use this when you want to force-sync right now without waiting for the schedule:
+  #   docker compose run --rm connectors               # full sync
+  #   docker compose run --rm connectors python sync.py --only jira
+  #   docker compose run --rm connectors python sync.py --only repos --force
+  connectors:
+    build:
+      context: ../connectors
+      dockerfile: Dockerfile
+    env_file:
+      - ../connectors/.env
+    environment:
+      SEARCHLY_URL: http://search-api:8081
+    volumes:
+      - sync-state:/app   # shares incremental state with sync-cron
+    depends_on:
+      search-api: { condition: service_started }
+    profiles: ["sync"]   # excluded from `up`; run explicitly with `run --rm connectors`
+
   prometheus:
     image: prom/prometheus:latest
     volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml"]
@@ -112,3 +245,8 @@ services:
   jaeger:
     image: jaegertracing/all-in-one:latest
     ports: ["16686:16686", "4317:4317", "4318:4318"]
+
+volumes:
+  ollama-data:           # persists downloaded Ollama models across restarts
+  warehouse-agent-data:  # persists customer registry (customers_db.json) across restarts
+  sync-state:            # persists .sync_state.json (incremental repo indexing state)
