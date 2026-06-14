@@ -16,7 +16,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    ports: ["6380:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -70,7 +70,7 @@ services:
     build:
       context: ../embedding-service
       dockerfile: Dockerfile
-    ports: ["8083:8083"]
+    ports: ["18083:8083"]
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8083/health || exit 1"]
       interval: 10s
@@ -112,7 +112,7 @@ services:
       OLLAMA_URL:      http://ollama:11434
       OLLAMA_MODEL:    ${OLLAMA_MODEL:-llama3.2:3b}
       SEARCHLY_URL:    http://gateway:8080
-      SEARCHLY_TENANT: ${SEARCHLY_TENANT:-greyorange}
+      SEARCHLY_TENANT: ${SEARCHLY_TENANT:-default}
       CUSTOMERS_YML:   /app/customers.yml           # imported once at startup
       CUSTOMERS_DB:    /app/data/customers_db.json  # live persistent registry
       AUTH_DB:         /app/data/auth_db.json       # API key store
@@ -131,7 +131,7 @@ services:
       - warehouse-agent-data:/app/data
       # SSH key for kubectl bastion access (mount your actual key)
       - ${SSH_KEY_PATH:-~/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
-    ports: ["8084:8084"]
+    ports: ["18084:8084"]
     depends_on:
       ollama: { condition: service_healthy }
     healthcheck:
@@ -186,7 +186,7 @@ services:
     environment:
       REDIS_HOST: redis
       SEARCH_API_URI: http://search-api:8081
-    ports: ["8080:8080"]
+    ports: ["18080:8080"]
     depends_on:
       redis:      { condition: service_healthy }
       search-api: { condition: service_started }
@@ -237,14 +237,16 @@ services:
       search-api: { condition: service_started }
     profiles: ["sync"]   # excluded from `up`; run explicitly with `run --rm connectors`
 
-  prometheus:
-    image: prom/prometheus:latest
-    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml"]
-    ports: ["9090:9090"]
+  # prometheus — optional observability; comment out if port 9090 is already allocated
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml"]
+  #   ports: ["9090:9090"]
 
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    ports: ["16686:16686", "4317:4317", "4318:4318"]
+  # jaeger — optional distributed tracing; comment out if ports 4317/4318/16686 are already allocated
+  # jaeger:
+  #   image: jaegertracing/all-in-one:latest
+  #   ports: ["16686:16686", "4317:4317", "4318:4318"]
 
 volumes:
   ollama-data:           # persists downloaded Ollama models across restarts
