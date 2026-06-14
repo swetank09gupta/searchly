@@ -208,12 +208,13 @@ services:
       - ../connectors/.env
     environment:
       SEARCHLY_URL:               http://search-api:8081
+      SYNC_STATE_DIR:             /data
       SYNC_DEPLOY_INTERVAL_MIN:   ${SYNC_DEPLOY_INTERVAL_MIN:-60}   # deployment state refresh
       SYNC_FULL_INTERVAL_HOURS:   ${SYNC_FULL_INTERVAL_HOURS:-4}    # Jira + Confluence + repos
       # SYNC_STARTUP_WAIT_SEC:    90    # grace period before very first sync
     volumes:
       # .sync_state.json persists here so incremental indexing survives restarts
-      - sync-state:/app
+      - sync-state:/data
     depends_on:
       search-api: { condition: service_started }
     restart: unless-stopped
@@ -232,7 +233,7 @@ services:
     environment:
       SEARCHLY_URL: http://search-api:8081
     volumes:
-      - sync-state:/app   # shares incremental state with sync-cron
+      - sync-state:/data   # shares incremental state with sync-cron
     depends_on:
       search-api: { condition: service_started }
     profiles: ["sync"]   # excluded from `up`; run explicitly with `run --rm connectors`

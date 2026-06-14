@@ -120,8 +120,11 @@ def _api_get(url: str, *, auth=None, headers=None, params=None,
 
 SCRIPT_DIR = Path(__file__).parent
 
-# File that tracks the last-indexed git HEAD per repo so we can skip unchanged ones.
-SYNC_STATE_FILE = SCRIPT_DIR / ".sync_state.json"
+# State file persisted on the sync-state Docker volume (/data in container).
+# Falls back to script dir for local runs outside Docker.
+_STATE_DIR = Path(os.environ.get("SYNC_STATE_DIR", "/data"))
+_STATE_DIR.mkdir(parents=True, exist_ok=True)
+SYNC_STATE_FILE = _STATE_DIR / ".sync_state.json"
 
 
 def _load_sync_state() -> dict:
