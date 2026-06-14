@@ -916,14 +916,19 @@ class JiraFetcher:
         return [p["key"] for p in r.json()]
 
     def fetch_issues(self, project: str) -> list:
-        issues, start = [], 0
+        # /rest/api/3/search was deprecated (returns 410 Gone).
+        # /rest/api/3/search/jql uses cursor-based pagination via nextPageToken.
+        issues = []
+        params: dict = {
+            "jql": f"project = {project} ORDER BY updated DESC",
+            "maxResults": 100,
+            "fields": "summary,description,status,assignee,priority,labels,"
+                      "comment,issuetype,created,updated,fixVersions,components",
+        }
         while True:
             r = _api_get(
-                f"{self.base}/rest/api/3/search", auth=self.auth,
-                params={"jql": f"project = {project} ORDER BY updated DESC",
-                        "startAt": start, "maxResults": 100,
-                        "fields": "summary,description,status,assignee,priority,labels,"
-                                  "comment,issuetype,created,updated,fixVersions,components"},
+                f"{self.base}/rest/api/3/search/jql", auth=self.auth,
+                params=params,
                 timeout=30,
             )
             r.raise_for_status()
@@ -935,9 +940,12 @@ class JiraFetcher:
                 doc = self._to_doc(issue)
                 if doc:
                     issues.append(doc)
-            start += len(batch)
-            if start >= min(data.get("total", 0), self.max):
+            if len(issues) >= self.max:
                 break
+            next_token = data.get("nextPageToken")
+            if not next_token:
+                break
+            params = {**params, "nextPageToken": next_token}
         log.info("Jira %s: %d issues", project, len(issues))
         return issues
 
