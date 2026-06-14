@@ -30,7 +30,7 @@ services:
       - DISABLE_SECURITY_PLUGIN=true
       - bootstrap.memory_lock=true
       - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
-      - plugins.knn.enabled=true
+      # kNN is enabled by default in OpenSearch 2.x — do not set plugins.knn.enabled
     ulimits:
       memlock: { soft: -1, hard: -1 }
     ports: ["9200:9200"]
