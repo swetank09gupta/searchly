@@ -7,9 +7,9 @@ MODEL="${OLLAMA_MODEL:-llama3.2:3b}"
 ollama serve &
 SERVER_PID=$!
 
-# Wait for the server to be ready
+# Wait for the server to be ready (use ollama list — curl not available in this image)
 echo "Waiting for Ollama server to start..."
-until curl -sf http://localhost:11434/ > /dev/null 2>&1; do
+until ollama list > /dev/null 2>&1; do
   sleep 1
 done
 echo "Ollama server ready."
