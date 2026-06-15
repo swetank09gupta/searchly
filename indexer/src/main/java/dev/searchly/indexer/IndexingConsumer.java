@@ -103,11 +103,22 @@ public class IndexingConsumer {
         log.info("Indexed {} chunks for doc {} in {}", chunks.size(), event.docId(), chunkIdx);
     }
 
+    // Max chars to embed — Confluence spaces with thousands of child pages can produce
+    // multi-MB strings that OOM the JVM during substring chunking. Cap at ~750 KB
+    // (~500k tokens worth), which covers even the most detailed technical pages.
+    private static final int MAX_EMBED_CHARS = 750_000;
+
     // Embed title + content together so the title context carries into each chunk's vector.
     private String buildTextForEmbedding(IndexingEvent event) {
         String title = event.title() != null ? event.title() : "";
         String content = event.content() != null ? event.content() : "";
-        return title.isBlank() ? content : title + "\n\n" + content;
+        String full = title.isBlank() ? content : title + "\n\n" + content;
+        if (full.length() > MAX_EMBED_CHARS) {
+            log.warn("Doc {} text truncated from {} to {} chars for chunking",
+                    event.docId(), full.length(), MAX_EMBED_CHARS);
+            full = full.substring(0, MAX_EMBED_CHARS);
+        }
+        return full;
     }
 
     private String docIndexName(IndexingEvent e) {

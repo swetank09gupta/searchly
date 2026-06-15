@@ -175,7 +175,7 @@ services:
       OPENSEARCH_HOST: opensearch
       EMBEDDING_SERVICE_URL: http://embedding-service:8083
       # Cap heap so the container doesn't OOM-kill on large document batches
-      JAVA_TOOL_OPTIONS: "-Xmx512m -Xms128m"
+      JAVA_TOOL_OPTIONS: "-Xmx768m -Xms128m"
     depends_on:
       opensearch:        { condition: service_healthy }
       kafka:             { condition: service_healthy }
