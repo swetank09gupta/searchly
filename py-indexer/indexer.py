@@ -6,8 +6,6 @@ Kafka consumer that reads IndexingEvent messages and writes to OpenSearch:
   - Text chunks    → chunks-{tenantId}   / chunks-shared      (kNN vector search)
 
 Embedding failures are non-fatal: the doc stays keyword-searchable.
-confluent-kafka processes one message at a time — no 500-record pre-fetch batch,
-no ZGC allocation stall, no JVM Keep-Alive-Timer OOM.
 """
 
 import json
@@ -19,7 +17,6 @@ import time
 
 import requests
 from kafka import KafkaConsumer
-from kafka.errors import KafkaError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -254,8 +251,6 @@ def main():
 
     _wait_for_opensearch()
 
-    # kafka-python is pure-Python; messages are Python bytes objects freed immediately
-    # by reference counting, avoiding the librdkafka C-heap backlog OOM issue.
     consumer = KafkaConsumer(
         bootstrap_servers=[KAFKA_BOOTSTRAP],
         group_id="indexer",
