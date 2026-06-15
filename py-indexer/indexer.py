@@ -18,7 +18,8 @@ import sys
 import time
 
 import requests
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from kafka import KafkaConsumer
+from kafka.errors import KafkaError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -251,61 +252,43 @@ def main():
 
     _wait_for_opensearch()
 
-    consumer = Consumer({
-        "bootstrap.servers":                  KAFKA_BOOTSTRAP,
-        "group.id":                           "indexer",
-        "auto.offset.reset":                  "earliest",
-        "enable.auto.commit":                 True,
-        "auto.commit.interval.ms":            1000,
-        "max.poll.interval.ms":               300_000,
-        "session.timeout.ms":                 30_000,
-        "heartbeat.interval.ms":              3_000,
-        "topic.metadata.refresh.interval.ms": 10_000,
-    })
-
+    # kafka-python is pure-Python; messages are Python bytes objects freed immediately
+    # by reference counting, avoiding the librdkafka C-heap backlog OOM issue.
+    consumer = KafkaConsumer(
+        bootstrap_servers=[KAFKA_BOOTSTRAP],
+        group_id="indexer",
+        auto_offset_reset="earliest",
+        enable_auto_commit=True,
+        auto_commit_interval_ms=1000,
+        max_poll_interval_ms=300_000,
+        session_timeout_ms=30_000,
+        heartbeat_interval_ms=3_000,
+        max_partition_fetch_bytes=1_048_576,  # 1 MB per partition per fetch
+        fetch_max_bytes=10_485_760,            # 10 MB total per fetch response
+        consumer_timeout_ms=-1,               # block until message or signal
+    )
     consumer.subscribe(
-        [r"^indexing\.(shared|enterprise\..+)$"],
-        on_assign=lambda c, ps: log.info(
-            "Assigned partitions: %s", [f"{p.topic}[{p.partition}]" for p in ps]
-        ),
-        on_revoke=lambda c, ps: log.warning(
-            "Partitions REVOKED: %s", [f"{p.topic}[{p.partition}]" for p in ps]
-        ),
+        pattern=r"^indexing\.(shared|enterprise\..+)$",
     )
     log.info("Subscribed to indexing.shared + indexing.enterprise.*")
 
     try:
         while not _shutdown:
-            try:
-                msg = consumer.poll(timeout=1.0)
-            except KafkaException as exc:
-                log.error("consumer.poll() raised KafkaException: %s", exc, exc_info=True)
-                time.sleep(2)
+            # poll() returns a dict of {TopicPartition: [ConsumerRecord]}
+            records = consumer.poll(timeout_ms=1000)
+            if not records:
                 continue
-
-            if msg is None:
-                continue
-            if msg.error():
-                err = msg.error()
-                if err.code() == KafkaError._PARTITION_EOF:
-                    log.debug("EOF %s[%d] @ %d", msg.topic(), msg.partition(), msg.offset())
-                else:
-                    fatal = getattr(err, "fatal", lambda: False)()
-                    log.error("Kafka error (fatal=%s): %s", fatal, err)
-                    if fatal:
-                        log.error("Fatal Kafka error — will restart consumer")
-                        break
-                continue
-
-            try:
-                event = json.loads(msg.value().decode("utf-8"))
-                process(event)
-            except Exception as exc:
-                log.error(
-                    "Failed processing %s[%d]@%d: %s",
-                    msg.topic(), msg.partition(), msg.offset(), exc,
-                    exc_info=True,
-                )
+            for tp, messages in records.items():
+                for msg in messages:
+                    try:
+                        event = json.loads(msg.value.decode("utf-8"))
+                        process(event)
+                    except Exception as exc:
+                        log.error(
+                            "Failed processing %s[%d]@%d: %s",
+                            tp.topic, tp.partition, msg.offset, exc,
+                            exc_info=True,
+                        )
     except KeyboardInterrupt:
         log.info("Interrupted — shutting down")
     except Exception as exc:
