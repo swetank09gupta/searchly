@@ -209,7 +209,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
+          memory: 1g
+    restart: unless-stopped
     depends_on:
       opensearch:        { condition: service_healthy }
       kafka:             { condition: service_healthy }
