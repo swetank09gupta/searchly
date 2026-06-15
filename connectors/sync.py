@@ -240,6 +240,52 @@ def load_customers() -> list:
 
 
 # ---------------------------------------------------------------------------
+# Document splitting
+# ---------------------------------------------------------------------------
+
+# Max chars per document posted to the API. Kafka messages that carry more
+# than this cause the Java indexer to OOM during deserialization even before
+# any application-level truncation can run.
+# 80k chars ≈ 20k words — more than enough for any single coherent page section.
+_DOC_SPLIT_CHARS = 80_000
+
+
+def split_doc(base_doc: dict) -> list:
+    """Split a document whose content exceeds _DOC_SPLIT_CHARS into multiple
+    docs, each within the limit. The full content is preserved across parts.
+    Parts are split on paragraph boundaries where possible.
+
+    Each part inherits the base metadata and gets a '(part N/M)' title suffix
+    so the RAG agent knows they belong together.
+    """
+    content = base_doc.get("content", "")
+    if len(content) <= _DOC_SPLIT_CHARS:
+        return [base_doc]
+
+    # Split on double-newlines (paragraph boundaries) to avoid mid-sentence cuts
+    paragraphs = content.split("\n\n")
+    parts, current = [], []
+    current_len = 0
+    for para in paragraphs:
+        if current_len + len(para) > _DOC_SPLIT_CHARS and current:
+            parts.append("\n\n".join(current))
+            current, current_len = [], 0
+        current.append(para)
+        current_len += len(para) + 2  # +2 for the \n\n separator
+    if current:
+        parts.append("\n\n".join(current))
+
+    total = len(parts)
+    base_title = base_doc["title"]
+    docs = []
+    for i, part_content in enumerate(parts, 1):
+        doc = {**base_doc, "content": part_content,
+               "title": f"{base_title} (part {i}/{total})"}
+        docs.append(doc)
+    return docs
+
+
+# ---------------------------------------------------------------------------
 # Searchly poster
 # ---------------------------------------------------------------------------
 
@@ -949,8 +995,6 @@ class JiraFetcher:
         log.info("Jira %s: %d issues", project, len(issues))
         return issues
 
-    _MAX_CONTENT = 300_000  # ~75k words — cap before posting to avoid OOM in indexer
-
     def _to_doc(self, issue: dict) -> Optional[dict]:
         f = issue.get("fields", {})
         title = f"[{issue['key']}] {f.get('summary', '')}"
@@ -961,8 +1005,6 @@ class JiraFetcher:
             if adf_to_text(c.get("body") or {})
         ]
         content = "\n\n".join(p for p in [desc] + comments if p).strip() or title
-        if len(content) > self._MAX_CONTENT:
-            content = content[:self._MAX_CONTENT]
         return {
             "title": title,
             "content": content,
@@ -1067,21 +1109,12 @@ class ConfluenceFetcher:
                  space, len(pages), child_count)
         return pages
 
-    # Max content chars stored per page. Some Confluence pages contain massive
-    # tables or embedded data that expand to MB of text — cap before posting to
-    # the API so Kafka messages stay small and the Java indexer doesn't OOM.
-    _MAX_CONTENT = 300_000  # ~75k words, enough for the longest technical docs
-
     def _to_doc(self, page: dict, space: str) -> Optional[dict]:
         title = page.get("title", "Untitled")
         html = (page.get("body") or {}).get("storage", {}).get("value", "")
         content = html_to_text(html).strip()
         if not content:
             return None
-        if len(content) > self._MAX_CONTENT:
-            log.debug("Confluence %s/%s: content truncated %d→%d chars",
-                      space, title[:40], len(content), self._MAX_CONTENT)
-            content = content[:self._MAX_CONTENT]
         labels = [l["name"] for l in
                   ((page.get("metadata") or {}).get("labels") or {}).get("results", [])]
         return {
@@ -1196,7 +1229,8 @@ def main():
             log.info("Syncing Jira: %s", projects)
             for proj in projects:
                 try:
-                    poster.post_batch(jira.fetch_issues(proj), workers=cfg.batch_size)
+                    docs = [part for d in jira.fetch_issues(proj) for part in split_doc(d)]
+                    poster.post_batch(docs, workers=cfg.batch_size)
                 except Exception as e:
                     log.error("Jira %s: %s", proj, e)
         else:
@@ -1210,7 +1244,8 @@ def main():
             log.info("Syncing Confluence: %s", spaces)
             for space in spaces:
                 try:
-                    poster.post_batch(conf.fetch_pages(space), workers=cfg.batch_size)
+                    docs = [part for d in conf.fetch_pages(space) for part in split_doc(d)]
+                    poster.post_batch(docs, workers=cfg.batch_size)
                 except Exception as e:
                     log.error("Confluence %s: %s", space, e)
         else:
