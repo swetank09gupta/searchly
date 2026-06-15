@@ -966,7 +966,7 @@ class JiraFetcher:
         # /rest/api/3/search/jql uses cursor-based pagination via nextPageToken.
         issues = []
         params: dict = {
-            "jql": f"project = {project} ORDER BY updated DESC",
+            "jql": f'project = "{project}" ORDER BY updated DESC',
             "maxResults": 100,
             "fields": "summary,description,status,assignee,priority,labels,"
                       "comment,issuetype,created,updated,fixVersions,components",

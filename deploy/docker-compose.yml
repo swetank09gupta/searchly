@@ -255,6 +255,9 @@ services:
     volumes:
       # .sync_state.json persists here so incremental indexing survives restarts
       - sync-state:/data
+      # product and customer config — same source as intelligence-agent
+      - ../connectors/products.yml:/app/products.yml:ro
+      - ../connectors/customers.yml:/app/customers.yml:ro
     deploy:
       resources:
         limits:
