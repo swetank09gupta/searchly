@@ -263,9 +263,10 @@ def main():
         max_poll_interval_ms=300_000,
         session_timeout_ms=30_000,
         heartbeat_interval_ms=3_000,
-        max_partition_fetch_bytes=1_048_576,  # 1 MB per partition per fetch
-        fetch_max_bytes=10_485_760,            # 10 MB total per fetch response
-        consumer_timeout_ms=-1,               # block until message or signal
+        max_partition_fetch_bytes=1_048_576,   # 1 MB per partition per fetch
+        fetch_max_bytes=10_485_760,             # 10 MB total per fetch response
+        consumer_timeout_ms=-1,                # block until message or signal
+        metadata_max_age_ms=10_000,            # refresh topic list every 10s
     )
     consumer.subscribe(
         pattern=r"^indexing\.(shared|enterprise\..+)$",
