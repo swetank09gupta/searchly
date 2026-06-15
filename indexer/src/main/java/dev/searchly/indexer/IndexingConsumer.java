@@ -57,12 +57,14 @@ public class IndexingConsumer {
             indexChunks(event, chunkIdx);
 
         } catch (OutOfMemoryError oom) {
-            // Rare: fires when a doc's content is so large that chunking/embedding
-            // exhausts the heap even after the MAX_EMBED_CHARS guard.
-            // Committing the Kafka offset (by not rethrowing) lets the container
-            // advance past this message instead of crashing and restarting.
-            log.error("OOM processing doc {} — skipping chunk index, doc is keyword-searchable",
-                    event.docId());
+            // Catching OutOfMemoryError to advance the Kafka offset (not rethrow)
+            // so the container stays alive and moves past this message.
+            Runtime rt = Runtime.getRuntime();
+            log.error("OOM processing doc {} type='{}' msg='{}' heap: free={}MB total={}MB max={}MB",
+                    event.docId(), oom.getClass().getName(), oom.getMessage(),
+                    rt.freeMemory() / 1024 / 1024,
+                    rt.totalMemory() / 1024 / 1024,
+                    rt.maxMemory() / 1024 / 1024);
             System.gc();
         } catch (Exception e) {
             log.error("Failed to index {}: {}", event.docId(), e.getMessage(), e);
