@@ -239,14 +239,15 @@ def main():
     _wait_for_opensearch()
 
     consumer = Consumer({
-        "bootstrap.servers":       KAFKA_BOOTSTRAP,
-        "group.id":                "indexer",
-        "auto.offset.reset":       "earliest",
-        "enable.auto.commit":      True,
-        "auto.commit.interval.ms": 1000,
-        "max.poll.interval.ms":    300_000,
-        "session.timeout.ms":      30_000,
-        "heartbeat.interval.ms":   3_000,
+        "bootstrap.servers":              KAFKA_BOOTSTRAP,
+        "group.id":                       "indexer",
+        "auto.offset.reset":              "earliest",
+        "enable.auto.commit":             True,
+        "auto.commit.interval.ms":        1000,
+        "max.poll.interval.ms":           300_000,
+        "session.timeout.ms":             30_000,
+        "heartbeat.interval.ms":          3_000,
+        "topic.metadata.refresh.interval.ms": 10_000,
     })
 
     consumer.subscribe(
