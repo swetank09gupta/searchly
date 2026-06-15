@@ -37,6 +37,7 @@ All of this is transparent to the user — they just get an answer (or a questio
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from agent import run_agent
