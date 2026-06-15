@@ -75,6 +75,13 @@ public class IndexingConsumer {
         List<String> chunks = chunker.chunk(fullText);
         if (chunks.isEmpty()) return;
 
+        Runtime rt = Runtime.getRuntime();
+        long freeM  = rt.freeMemory()  / 1024 / 1024;
+        long totalM = rt.totalMemory() / 1024 / 1024;
+        long maxM   = rt.maxMemory()   / 1024 / 1024;
+        log.info("heap before embed: free={}MB total={}MB max={}MB chunks={} doc={}",
+                freeM, totalM, maxM, chunks.size(), event.docId());
+
         List<List<Double>> vectors = embedder.embed(chunks);
         if (vectors.isEmpty()) {
             log.warn("Embedding unavailable for doc {} — skipping chunk index", event.docId());
