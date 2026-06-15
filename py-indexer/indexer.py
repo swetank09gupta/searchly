@@ -16,6 +16,7 @@ import os
 import signal
 import sys
 import time
+import tracemalloc
 
 import requests
 from kafka import KafkaConsumer
@@ -283,6 +284,9 @@ def main():
             pass
         return -1
 
+    tracemalloc.start()
+    _snap_interval = 5  # take tracemalloc snapshot every N messages
+
     try:
         while not _shutdown:
             # poll() returns a dict of {TopicPartition: [ConsumerRecord]}
@@ -293,6 +297,7 @@ def main():
             rss_before_poll = _rss_mb()
             log.info("poll() returned %d messages across %d partitions | RSS=%dMiB",
                      total_msgs, len(records), rss_before_poll)
+            msg_count = 0
             for tp, messages in records.items():
                 for msg in messages:
                     try:
@@ -301,9 +306,17 @@ def main():
                         process(event)
                         rss_post = _rss_mb()
                         delta = rss_post - rss_pre
+                        msg_count += 1
+                        if delta > 20 or msg_count % _snap_interval == 0:
+                            log.info("msg %d offset=%d doc=%s RSS=%dMiB delta=%+dMiB",
+                                     msg_count, msg.offset, event.get("docId", "?")[:8],
+                                     rss_post, delta)
                         if delta > 50:
-                            log.warning("RSS grew %dMiB during process() of offset %d (doc=%s)",
-                                        delta, msg.offset, event.get("docId", "?"))
+                            snap = tracemalloc.take_snapshot()
+                            top = snap.statistics("lineno")[:5]
+                            log.warning("RSS grew %dMiB at offset %d — top allocs:", delta, msg.offset)
+                            for stat in top:
+                                log.warning("  %s", stat)
                     except Exception as exc:
                         log.error(
                             "Failed processing %s[%d]@%d: %s",
