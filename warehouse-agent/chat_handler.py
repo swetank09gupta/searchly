@@ -138,7 +138,7 @@ class ChatHandler:
         # Env mentioned but not yet configured → offer to set it up
         if e_hint and not env_config and e_hint in LIFECYCLE_ORDER[1:]:
             ask = (
-                f"**{customer_record['name']}** doesn't have a **{e_hint}** "
+                f"**{customer_record.get('name', 'This customer')}** doesn't have a **{e_hint}** "
                 f"environment configured yet. "
                 f"I can answer from knowledge for now, or you can share the "
                 f"cluster details and I'll set it up:\n\n"

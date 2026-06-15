@@ -113,8 +113,8 @@ def _system_prompt(customer_record: dict | None, env_config: dict | None,
             "",
             "GUIDELINES:",
             "- Start with get_pod_status to see if any service is unhealthy or crashing.",
-            "- Use get_pod_logs for error/exception investigation.",
-            "- Use get_allocation_logs when the question is about task/order assignment.",
+            "- Use get_logs for error/exception investigation.",
+            "- Use get_logs with a relevant service/keyword filter when the question is about task/order assignment.",
             "- Use get_deployment_state when asked about versions or recent deployments.",
             "- Use search_knowledge to find matching Jira bugs or doc explanations.",
             "- Always say WHICH pod/log line you found the evidence in.",
@@ -222,8 +222,8 @@ async def run_agent(
                 result = {"error": f"Unknown tool: {fn_name}"}
             else:
                 # Inject runtime constants the model shouldn't have to supply
-                if fn_name in ("get_pod_logs", "get_deployment_state",
-                               "get_pod_status", "get_allocation_logs"):
+                if fn_name in ("get_logs", "get_deployment_state",
+                               "get_pod_status", "list_log_indices"):
                     # Replace customer_id with the resolved customer obj
                     fn_args["customer_obj"] = _RUNTIME["customer_obj"]
                     fn_args.pop("customer_id", None)
