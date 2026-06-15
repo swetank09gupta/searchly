@@ -56,8 +56,10 @@ public class ChunkIndexClient {
     public void indexDocument(String index, String tenantId, String docId,
                               String title, String content,
                               Map<String, Object> metadata, String createdAt) throws Exception {
+        log.info("idx-step1 ensureDocIdx doc={}", docId);
         ensureDocumentIndex(index);
 
+        log.info("idx-step2 buildMap doc={} content_len={}", docId, content != null ? content.length() : 0);
         Map<String, Object> doc = new LinkedHashMap<>();
         doc.put("tenant_id", tenantId);
         doc.put("title",     title);
@@ -65,8 +67,11 @@ public class ChunkIndexClient {
         doc.put("metadata",  metadata != null ? metadata : Map.of());
         doc.put("created_at", createdAt);
 
+        log.info("idx-step3 serialize doc={}", docId);
+        byte[] body = mapper.writeValueAsBytes(doc);
+        log.info("idx-step4 PUT doc={} body_len={}", docId, body.length);
         String url = osBase + "/" + index + "/_doc/" + docId + "?routing=" + tenantId;
-        put(url, mapper.writeValueAsBytes(doc));
+        put(url, body);
         log.info("Indexed doc {} for tenant {} in {}", docId, tenantId, index);
     }
 
@@ -166,6 +171,7 @@ public class ChunkIndexClient {
     }
 
     private void put(String url, byte[] jsonBody) throws Exception {
+        log.info("put-a open {}", url);
         HttpURLConnection conn = open(url, "PUT");
         conn.setDoOutput(true);
         conn.setConnectTimeout(10_000);
@@ -173,11 +179,14 @@ public class ChunkIndexClient {
         conn.setRequestProperty("Content-Type",   "application/json; charset=utf-8");
         conn.setRequestProperty("Content-Length", String.valueOf(jsonBody.length));
 
+        log.info("put-b write body_len={}", jsonBody.length);
         try (OutputStream os = conn.getOutputStream()) {
             os.write(jsonBody);
         }
 
+        log.info("put-c getResponseCode");
         int status = conn.getResponseCode();
+        log.info("put-d status={}", status);
         if (status >= 300) {
             String body = "";
             try (InputStream es = conn.getErrorStream()) {
@@ -188,6 +197,7 @@ public class ChunkIndexClient {
             // drain response to allow connection reuse
             try (InputStream is = conn.getInputStream()) { is.transferTo(OutputStream.nullOutputStream()); }
         }
+        log.info("put-e disconnect");
         conn.disconnect();
     }
 
