@@ -262,10 +262,11 @@ def main():
         "heartbeat.interval.ms":              3_000,
         "topic.metadata.refresh.interval.ms": 10_000,
         # Limit pre-fetch buffer so a large backlog doesn't spike memory to OOM.
-        # Default queued.max.messages.kbytes is 65536 (64MB) per partition;
-        # with 20k+ messages this fills gigabytes before any processing happens.
-        "queued.max.messages.kbytes":         16384,   # 16 MB per partition
-        "fetch.message.max.bytes":            1048576,  # 1 MB per fetch request
+        # Default queued.max.messages.kbytes is 65536 (64MB) per partition and
+        # fetch.max.bytes is 52MB; with 20k+ messages in the topic these fill
+        # gigabytes before any processing happens.
+        "queued.max.messages.kbytes":         16384,   # 16 MB per partition queue
+        "fetch.max.bytes":                    1048576,  # 1 MB per fetch batch total
     })
 
     consumer.subscribe(
