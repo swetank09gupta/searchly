@@ -52,6 +52,14 @@ public class IndexingConsumer {
             ensureIndex(index);
             indexFullDocument(index, event);
             indexChunks(event);
+        } catch (OutOfMemoryError oom) {
+            // A single massive document (e.g. Confluence space with thousands of child pages)
+            // can exhaust the heap even before truncation runs. Log and skip — the doc is
+            // already written to the keyword index; only vector chunks are lost for this one doc.
+            // Committing the offset lets Kafka advance past it so the container stays alive.
+            log.error("OOM processing doc {} (content too large for heap) — skipping chunk index, doc is keyword-searchable",
+                    event.docId());
+            System.gc();
         } catch (IOException e) {
             log.error("Failed to index {}: {}", event.docId(), e.getMessage(), e);
             throw new RuntimeException(e);
@@ -109,16 +117,18 @@ public class IndexingConsumer {
     private static final int MAX_EMBED_CHARS = 750_000;
 
     // Embed title + content together so the title context carries into each chunk's vector.
+    // IMPORTANT: truncate content BEFORE concatenation — concatenating two multi-MB strings
+    // doubles memory pressure and can OOM before we even reach the truncation check.
     private String buildTextForEmbedding(IndexingEvent event) {
         String title = event.title() != null ? event.title() : "";
         String content = event.content() != null ? event.content() : "";
-        String full = title.isBlank() ? content : title + "\n\n" + content;
-        if (full.length() > MAX_EMBED_CHARS) {
-            log.warn("Doc {} text truncated from {} to {} chars for chunking",
-                    event.docId(), full.length(), MAX_EMBED_CHARS);
-            full = full.substring(0, MAX_EMBED_CHARS);
+        // Truncate content first so concatenation never creates a huge intermediate string
+        if (content.length() > MAX_EMBED_CHARS) {
+            log.warn("Doc {} content truncated from {} to {} chars for chunking",
+                    event.docId(), content.length(), MAX_EMBED_CHARS);
+            content = content.substring(0, MAX_EMBED_CHARS);
         }
-        return full;
+        return title.isBlank() ? content : title + "\n\n" + content;
     }
 
     private String docIndexName(IndexingEvent e) {
