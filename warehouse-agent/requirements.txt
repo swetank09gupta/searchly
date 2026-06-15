@@ -5,3 +5,4 @@ pydantic==2.9.2
 pyyaml==6.0.2
 python-dotenv==1.0.1
 paramiko==3.4.0
+apscheduler==3.10.4

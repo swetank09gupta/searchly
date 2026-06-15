@@ -41,6 +41,9 @@ public class EmbeddingClient {
     // 50 chunks × 384 floats × ~12 chars/float ≈ 230 KB per response — safe.
     private static final int EMBED_BATCH_SIZE = 50;
 
+    /** Written into every chunk document as `embedding_version` for P3.3 source lineage. */
+    public static final String EMBEDDING_VERSION = "bge-small-en-v1.5-v1";
+
     private final String embedUrl;
     private final ObjectMapper mapper;
 

@@ -50,6 +50,32 @@ searchly:
   warehouse-agent:
     url: ${WAREHOUSE_AGENT_URL:}
 
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        failureRateThreshold: 50
+        minimumNumberOfCalls: 10
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        waitDurationInOpenState: 30s
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+    instances:
+      embedding:
+        baseConfig: default
+      ollama:
+        baseConfig: default
+        waitDurationInOpenState: 60s
+        minimumNumberOfCalls: 5
+      knnSearch:
+        baseConfig: default
+      warehouseAgent:
+        baseConfig: default
+      reranker:
+        baseConfig: default
+        minimumNumberOfCalls: 5
+
 management:
   endpoints:
     web:

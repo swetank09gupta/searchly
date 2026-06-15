@@ -15,58 +15,56 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Cross-encoder reranker backed by BAAI/bge-reranker-base (served by embedding-service).
+ * Returns a relevance score per passage; higher = more relevant.
+ */
 @Component
-public class EmbeddingClient {
-    private static final Logger log = LoggerFactory.getLogger(EmbeddingClient.class);
+public class RerankClient {
+    private static final Logger log = LoggerFactory.getLogger(RerankClient.class);
 
     private final String baseUrl;
     private final ObjectMapper mapper;
     private final HttpClient http;
 
-    public EmbeddingClient(
+    public RerankClient(
             @Value("${searchly.embedding.url:http://localhost:8083}") String baseUrl,
             ObjectMapper mapper) {
         this.baseUrl = baseUrl;
         this.mapper = mapper;
-        this.http = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
     }
 
-    /** Embed a search query — uses BGE query prefix for better retrieval quality. */
-    public List<Double> embedQuery(String text) {
-        return embed(text, true);
-    }
-
-    @CircuitBreaker(name = "embedding", fallbackMethod = "embedFallback")
+    /**
+     * Score each passage against the query. Returns empty list on circuit open or error.
+     */
+    @CircuitBreaker(name = "reranker", fallbackMethod = "rerankFallback")
     @SuppressWarnings("unchecked")
-    public List<Double> embed(String text, boolean isQuery) {
+    public List<Double> rerank(String query, List<String> passages) {
         try {
-            String body = mapper.writeValueAsString(Map.of("texts", List.of(text), "is_query", isQuery));
+            String body = mapper.writeValueAsString(Map.of("query", query, "passages", passages));
             HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(baseUrl + "/embed"))
+                    .uri(URI.create(baseUrl + "/rerank"))
                     .header("Content-Type", "application/json")
                     .timeout(Duration.ofSeconds(15))
                     .POST(HttpRequest.BodyPublishers.ofString(body))
                     .build();
-
             HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
-                throw new RuntimeException("Embedding service HTTP " + resp.statusCode());
+                throw new RuntimeException("Reranker HTTP " + resp.statusCode());
             }
             Map<String, Object> result = mapper.readValue(resp.body(), Map.class);
-            List<List<Double>> vectors = (List<List<Double>>) result.get("vectors");
-            return (vectors != null && !vectors.isEmpty()) ? vectors.get(0) : List.of();
+            return (List<Double>) result.get("scores");
         } catch (RuntimeException re) {
             throw re;
         } catch (Exception e) {
-            throw new RuntimeException("Embedding call failed", e);
+            throw new RuntimeException("Reranker call failed", e);
         }
     }
 
     @SuppressWarnings("unused")
-    private List<Double> embedFallback(String text, boolean isQuery, Throwable t) {
-        log.warn("Embedding circuit open or failed — returning empty vector: {}", t.getMessage());
+    private List<Double> rerankFallback(String query, List<String> passages, Throwable t) {
+        log.warn("Reranker circuit open or failed — skipping rerank: {}", t.getMessage());
         return List.of();
     }
 }

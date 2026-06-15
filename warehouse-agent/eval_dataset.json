@@ -1,0 +1,32 @@
+[
+  {
+    "id": "q001",
+    "question": "What is RDF in the context of GreyMatter order allocation?",
+    "expected_sources": ["greymatter", "allocation"],
+    "expected_answer_keywords": ["robotic", "fulfillment", "allocation", "task"]
+  },
+  {
+    "id": "q002",
+    "question": "What does the allocator do when no robot is available for a task?",
+    "expected_sources": ["allocator", "greymatter"],
+    "expected_answer_keywords": ["queue", "wait", "retry", "robot", "available"]
+  },
+  {
+    "id": "q003",
+    "question": "How does pick-assist handle barcode mismatch?",
+    "expected_sources": ["pick-assist", "barcode"],
+    "expected_answer_keywords": ["mismatch", "scan", "error", "operator"]
+  },
+  {
+    "id": "q004",
+    "question": "What Jira issues are related to Redis connection timeouts?",
+    "expected_sources": ["jira", "AES"],
+    "expected_answer_keywords": ["redis", "timeout", "connection", "jira"]
+  },
+  {
+    "id": "q005",
+    "question": "How are warehouse zones configured in GreyMatter?",
+    "expected_sources": ["zone", "greymatter", "configuration"],
+    "expected_answer_keywords": ["zone", "config", "warehouse", "aisle"]
+  }
+]

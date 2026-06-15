@@ -4,6 +4,7 @@ import dev.searchly.api.model.DocumentEntity;
 import dev.searchly.api.repository.DocumentRepository;
 import dev.searchly.api.repository.TenantRepository;
 import dev.searchly.api.security.TenantContextHolder;
+import org.springframework.context.annotation.Lazy;
 import dev.searchly.common.DocumentDto;
 import dev.searchly.common.IndexingEvent;
 import dev.searchly.common.TenantContext;
@@ -27,18 +28,21 @@ public class DocumentService {
     private final KafkaTemplate<String, IndexingEvent> kafka;
     private final OpenSearchClient os;
     private final CacheService cache;
+    private final SyncService syncService;
 
     @Value("${searchly.kafka.topic-shared}") String sharedTopic;
     @Value("${searchly.kafka.topic-enterprise-prefix}") String enterprisePrefix;
 
     public DocumentService(DocumentRepository docRepo, TenantRepository tenantRepo,
                            KafkaTemplate<String, IndexingEvent> kafka, OpenSearchClient os,
-                           CacheService cache) {
-        this.docRepo = docRepo;
-        this.tenantRepo = tenantRepo;
-        this.kafka = kafka;
-        this.os = os;
-        this.cache = cache;
+                           CacheService cache,
+                           @Lazy SyncService syncService) {
+        this.docRepo      = docRepo;
+        this.tenantRepo   = tenantRepo;
+        this.kafka        = kafka;
+        this.os           = os;
+        this.cache        = cache;
+        this.syncService  = syncService;
     }
 
     @Transactional
@@ -73,6 +77,17 @@ public class DocumentService {
                 ? enterprisePrefix + ctx.tenantId()
                 : sharedTopic;
         kafka.send(topic, ctx.tenantId(), event);
+
+        // Source tracking — if the document carries source provenance metadata,
+        // upsert the tracking record so the purge cycle can detect deletions.
+        if (req.metadata() != null) {
+            Object srcId   = req.metadata().get("source_id");
+            Object srcType = req.metadata().get("source");
+            if (srcId instanceof String s && !s.isBlank()
+                    && srcType instanceof String t && !t.isBlank()) {
+                syncService.trackSourceDocument(s, t, ctx.tenantId(), id.toString());
+            }
+        }
 
         cache.invalidateTenant(ctx.tenantId());
         return new DocumentDto.CreateResponse(id.toString(), ctx.tenantId(), "PENDING", now);

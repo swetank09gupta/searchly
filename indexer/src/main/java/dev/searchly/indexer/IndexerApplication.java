@@ -21,6 +21,10 @@ public class IndexerApplication {
         return new NewTopic("indexing.shared", 6, (short) 1);
     }
 
+    @Bean public NewTopic indexingRetry1Topic() { return new NewTopic("indexing.retry1", 1, (short) 1); }
+    @Bean public NewTopic indexingRetry2Topic() { return new NewTopic("indexing.retry2", 1, (short) 1); }
+    @Bean public NewTopic indexingRetry3Topic() { return new NewTopic("indexing.retry3", 1, (short) 1); }
+
     @Bean
     public NewTopic indexingDlqTopic() {
         return new NewTopic("indexing.dlq", 1, (short) 1);

@@ -292,6 +292,7 @@ def split_doc(base_doc: dict) -> list:
 class SearchlyPoster:
     def __init__(self, cfg: Config):
         self.url = f"{cfg.searchly_url}/api/v1/documents"
+        self.purge_url = f"{cfg.searchly_url}/api/v1/admin/sync/purge-stale"
         self.headers = {
             "Content-Type": "application/json",
             "X-Tenant-Id": cfg.searchly_tenant,
@@ -322,6 +323,26 @@ class SearchlyPoster:
     def post_batch(self, docs: list, workers: int = 5):
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(self.post, docs))
+
+    def purge_stale(self, source_type: str, sync_started_at: str):
+        """Delete source docs not seen since sync_started_at (tombstone support, P0.3)."""
+        if self.dry_run:
+            log.info("[dry-run] purge-stale source_type=%s cutoff=%s", source_type, sync_started_at)
+            return
+        try:
+            r = requests.post(
+                self.purge_url,
+                headers=self.headers,
+                json={"source_type": source_type, "sync_started_at": sync_started_at},
+                timeout=60,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                log.info("Purged %d stale %s docs", data.get("purged", 0), source_type)
+            else:
+                log.warning("purge-stale HTTP %d: %s", r.status_code, r.text[:200])
+        except Exception as e:
+            log.warning("purge-stale error: %s", e)
 
     def summary(self):
         log.info("Done ── indexed: %d  failed: %d", self.ok, self.failed)
@@ -703,11 +724,12 @@ class RepoIndexer:
                     chunks = self._chunk_code(text, path.suffix.lower())
                 for i, chunk in enumerate(chunks):
                     meta: dict = {
-                        "source": "git",
-                        "product": product,
-                        "repo": repo_name,
+                        "source":    "git",
+                        "source_id": f"{repo_name}:{rel}",   # tombstone tracking (P0.3)
+                        "product":   product,
+                        "repo":      repo_name,
                         "file_path": rel,
-                        "language": _lang(path.suffix.lower()),
+                        "language":  _lang(path.suffix.lower()),
                         "chunk_index": i,
                         # no customer tag — shared knowledge
                     }
@@ -1009,19 +1031,20 @@ class JiraFetcher:
             "title": title,
             "content": content,
             "metadata": {
-                "source": "jira",
-                "issue_key": issue["key"],
-                "project": issue["key"].split("-")[0],
-                "status": (f.get("status") or {}).get("name", ""),
-                "issue_type": (f.get("issuetype") or {}).get("name", ""),
-                "priority": (f.get("priority") or {}).get("name", ""),
-                "assignee": (f.get("assignee") or {}).get("displayName", ""),
-                "labels": f.get("labels", []),
-                "components": [c["name"] for c in f.get("components", [])],
+                "source":      "jira",
+                "source_id":   issue["key"],   # used for tombstone tracking (P0.3)
+                "issue_key":   issue["key"],
+                "project":     issue["key"].split("-")[0],
+                "status":      (f.get("status") or {}).get("name", ""),
+                "issue_type":  (f.get("issuetype") or {}).get("name", ""),
+                "priority":    (f.get("priority") or {}).get("name", ""),
+                "assignee":    (f.get("assignee") or {}).get("displayName", ""),
+                "labels":      f.get("labels", []),
+                "components":  [c["name"] for c in f.get("components", [])],
                 "fix_versions": [v["name"] for v in f.get("fixVersions", [])],
-                "url": f"{self.base}/browse/{issue['key']}",
-                "created": f.get("created", ""),
-                "updated": f.get("updated", ""),
+                "url":         f"{self.base}/browse/{issue['key']}",
+                "created":     f.get("created", ""),
+                "updated":     f.get("updated", ""),
             },
         }
 
@@ -1121,13 +1144,14 @@ class ConfluenceFetcher:
             "title": f"[Confluence/{space}] {title}",
             "content": content,
             "metadata": {
-                "source": "confluence",
-                "space": space,
-                "page_id": page.get("id", ""),
-                "labels": labels,
-                "url": f"{self.base}/wiki{page.get('_links', {}).get('webui', '')}",
-                "updated": (((page.get("history") or {}).get("lastUpdated") or {})
-                            .get("when", "")),
+                "source":    "confluence",
+                "source_id": page.get("id", ""),   # used for tombstone tracking (P0.3)
+                "space":     space,
+                "page_id":   page.get("id", ""),
+                "labels":    labels,
+                "url":       f"{self.base}/wiki{page.get('_links', {}).get('webui', '')}",
+                "updated":   (((page.get("history") or {}).get("lastUpdated") or {})
+                              .get("when", "")),
             },
         }
 
@@ -1211,6 +1235,7 @@ def main():
     customers = load_customers()
     poster = SearchlyPoster(cfg)
     only = args.only
+    sync_started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     # ── List repos mode (helper for filling products.yml) ─────────────────
     if args.list_repos:
@@ -1233,6 +1258,7 @@ def main():
                     poster.post_batch(docs, workers=cfg.batch_size)
                 except Exception as e:
                     log.error("Jira %s: %s", proj, e)
+            poster.purge_stale("jira", sync_started_at)
         else:
             log.info("Jira not configured, skipping.")
 
@@ -1248,6 +1274,7 @@ def main():
                     poster.post_batch(docs, workers=cfg.batch_size)
                 except Exception as e:
                     log.error("Confluence %s: %s", space, e)
+            poster.purge_stale("confluence", sync_started_at)
         else:
             log.info("Confluence not configured, skipping.")
 
@@ -1256,6 +1283,7 @@ def main():
         if products_cfg:
             log.info("Indexing repos from products.yml ...")
             RepoIndexer(cfg, products_cfg).index_all_products(poster)
+            poster.purge_stale("git", sync_started_at)
         else:
             log.info("products.yml not loaded, skipping repos.")
 

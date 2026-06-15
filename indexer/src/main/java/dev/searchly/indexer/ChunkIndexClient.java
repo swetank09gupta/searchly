@@ -33,6 +33,16 @@ public class ChunkIndexClient {
     private static final Logger log = LoggerFactory.getLogger(ChunkIndexClient.class);
     private static final int VECTOR_DIM = 384;
 
+    // ── Bulk entry records (P0.6) ─────────────────────────────────────────────
+    public record BulkDocEntry(String index, String tenantId, String docId,
+                                String title, String content, Map<String, Object> metadata,
+                                String createdAt) {}
+
+    public record BulkChunkEntry(String index, String tenantId, String docId, int chunkIdx,
+                                  String title, String chunkText, List<Double> embedding,
+                                  Map<String, Object> metadata, String createdAt,
+                                  String embeddingVersion) {}
+
     private final String osBase;
     private final ObjectMapper mapper;
     private final Set<String> ensuredDocIndices   = ConcurrentHashMap.newKeySet();
@@ -66,6 +76,7 @@ public class ChunkIndexClient {
         doc.put("content",   content);
         doc.put("metadata",  metadata != null ? metadata : Map.of());
         doc.put("created_at", createdAt);
+        doc.put("content_fingerprint", ContentFingerprinter.fingerprint(title, content));
 
         log.info("idx-step3 serialize doc={}", docId);
         byte[] body = mapper.writeValueAsBytes(doc);
@@ -73,6 +84,123 @@ public class ChunkIndexClient {
         String url = osBase + "/" + index + "/_doc/" + docId + "?routing=" + tenantId;
         put(url, body);
         log.info("Indexed doc {} for tenant {} in {}", docId, tenantId, index);
+    }
+
+    /**
+     * Returns the stored content_fingerprint for a document, or null if the document
+     * does not yet exist or the field is absent. Used to skip chunk re-embedding
+     * when content has not changed between sync cycles.
+     */
+    @SuppressWarnings("unchecked")
+    public String getDocumentFingerprint(String index, String docId) {
+        try {
+            String url = osBase + "/" + index + "/_doc/" + docId
+                    + "?_source_includes=content_fingerprint";
+            HttpURLConnection conn = open(url, "GET");
+            conn.setConnectTimeout(5_000);
+            conn.setReadTimeout(5_000);
+            int status = conn.getResponseCode();
+            if (status == 404) return null;
+            if (status >= 300) return null;
+            try (InputStream is = conn.getInputStream()) {
+                Map<String, Object> resp = mapper.readValue(is, Map.class);
+                Map<String, Object> src = (Map<String, Object>) resp.get("_source");
+                return src != null ? (String) src.get("content_fingerprint") : null;
+            }
+        } catch (Exception e) {
+            log.debug("getDocumentFingerprint failed for {}/{}: {}", index, docId, e.getMessage());
+            return null;
+        }
+    }
+
+    // ── Bulk indexing (P0.6) ─────────────────────────────────────────────────
+
+    /**
+     * Bulk-indexes up to 500 full documents in a single /_bulk request.
+     * 10-50× throughput improvement over per-document PUT.
+     */
+    public void bulkIndexDocuments(List<BulkDocEntry> entries) throws Exception {
+        if (entries.isEmpty()) return;
+        // Ensure all required indices exist first
+        Set<String> indices = new java.util.LinkedHashSet<>();
+        for (BulkDocEntry e : entries) indices.add(e.index());
+        for (String idx : indices) ensureDocumentIndex(idx);
+
+        StringBuilder ndjson = new StringBuilder();
+        for (BulkDocEntry e : entries) {
+            Map<String, Object> meta = Map.of(
+                    "_index", e.index(),
+                    "_id",    e.docId(),
+                    "routing", e.tenantId());
+            ndjson.append(mapper.writeValueAsString(Map.of("index", meta))).append('\n');
+
+            Map<String, Object> doc = new LinkedHashMap<>();
+            doc.put("tenant_id",  e.tenantId());
+            doc.put("title",      e.title());
+            doc.put("content",    e.content());
+            doc.put("metadata",   e.metadata());
+            doc.put("created_at", e.createdAt());
+            doc.put("content_fingerprint", ContentFingerprinter.fingerprint(e.title(), e.content()));
+            ndjson.append(mapper.writeValueAsString(doc)).append('\n');
+        }
+        bulk(ndjson.toString());
+        log.info("Bulk indexed {} documents", entries.size());
+    }
+
+    /**
+     * Bulk-indexes chunk vectors in a single /_bulk request.
+     */
+    public void bulkIndexChunks(List<BulkChunkEntry> entries) throws Exception {
+        if (entries.isEmpty()) return;
+        Set<String> indices = new java.util.LinkedHashSet<>();
+        for (BulkChunkEntry e : entries) indices.add(e.index());
+        for (String idx : indices) ensureChunkIndex(idx);
+
+        StringBuilder ndjson = new StringBuilder();
+        for (BulkChunkEntry e : entries) {
+            String id = e.docId() + "-chunk-" + e.chunkIdx();
+            Map<String, Object> meta = Map.of(
+                    "_index", e.index(),
+                    "_id",    id,
+                    "routing", e.tenantId());
+            ndjson.append(mapper.writeValueAsString(Map.of("index", meta))).append('\n');
+
+            Map<String, Object> doc = new LinkedHashMap<>();
+            doc.put("doc_id",           e.docId());
+            doc.put("chunk_index",       e.chunkIdx());
+            doc.put("tenant_id",         e.tenantId());
+            doc.put("title",             e.title());
+            doc.put("chunk_text",        e.chunkText());
+            doc.put("embedding",         e.embedding());
+            doc.put("metadata",          e.metadata());
+            doc.put("created_at",        e.createdAt());
+            doc.put("embedding_version", e.embeddingVersion());
+            ndjson.append(mapper.writeValueAsString(doc)).append('\n');
+        }
+        bulk(ndjson.toString());
+        log.debug("Bulk indexed {} chunks", entries.size());
+    }
+
+    private void bulk(String ndjson) throws Exception {
+        byte[] body = ndjson.getBytes(StandardCharsets.UTF_8);
+        HttpURLConnection conn = open(osBase + "/_bulk", "POST");
+        conn.setDoOutput(true);
+        conn.setConnectTimeout(15_000);
+        conn.setReadTimeout(60_000);
+        conn.setRequestProperty("Content-Type", "application/x-ndjson; charset=utf-8");
+        conn.setRequestProperty("Content-Length", String.valueOf(body.length));
+        try (OutputStream os = conn.getOutputStream()) { os.write(body); }
+        int status = conn.getResponseCode();
+        if (status >= 300) {
+            String err = "";
+            try (InputStream es = conn.getErrorStream()) {
+                if (es != null) err = new String(es.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            log.warn("Bulk /_bulk → {}: {}", status, err.substring(0, Math.min(300, err.length())));
+        } else {
+            try (InputStream is = conn.getInputStream()) { is.transferTo(OutputStream.nullOutputStream()); }
+        }
+        conn.disconnect();
     }
 
     private void ensureDocumentIndex(String index) throws Exception {
@@ -96,19 +224,21 @@ public class ChunkIndexClient {
 
     public void indexChunk(String chunkIndex, String tenantId, String docId, int chunkIdx,
                            String title, String chunkText, List<Double> embedding,
-                           Map<String, Object> metadata, String createdAt) {
+                           Map<String, Object> metadata, String createdAt,
+                           String embeddingVersion) {
         try {
             ensureChunkIndex(chunkIndex);
 
             Map<String, Object> doc = new LinkedHashMap<>();
-            doc.put("doc_id",      docId);
-            doc.put("chunk_index", chunkIdx);
-            doc.put("tenant_id",   tenantId);
-            doc.put("title",       title);
-            doc.put("chunk_text",  chunkText);
-            doc.put("embedding",   embedding);
-            doc.put("metadata",    metadata);
-            doc.put("created_at",  createdAt);
+            doc.put("doc_id",            docId);
+            doc.put("chunk_index",        chunkIdx);
+            doc.put("tenant_id",          tenantId);
+            doc.put("title",              title);
+            doc.put("chunk_text",         chunkText);
+            doc.put("embedding",          embedding);
+            doc.put("metadata",           metadata);
+            doc.put("created_at",         createdAt);
+            doc.put("embedding_version",  embeddingVersion);
 
             String id  = docId + "-chunk-" + chunkIdx;
             String url = osBase + "/" + chunkIndex + "/_doc/" + id + "?routing=" + tenantId;

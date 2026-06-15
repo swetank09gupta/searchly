@@ -1,6 +1,7 @@
 package dev.searchly.api.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -16,16 +17,7 @@ import java.util.Map;
 
 /**
  * HTTP client for the Python warehouse-agent /api/v1/chat endpoint.
- *
- * The agent:
- *   - Fuzzy-resolves customer names ("samsclub atl" → "sams-club-atlanta")
- *   - Extracts env hint from the question if not supplied
- *   - Auto-registers unknown customers via conversational clarification
- *   - Queries live k8s clusters for operational questions
- *   - Returns needs_clarification=true when it needs more info from the user
- *
- * session_id is passed through from the user's request and returned in the
- * response so the caller can maintain multi-turn conversation context.
+ * Protected by a circuit breaker so agent timeouts don't cascade to search.
  */
 @Component
 public class WarehouseAgentClient {
@@ -53,58 +45,53 @@ public class WarehouseAgentClient {
 
     public boolean isEnabled() { return enabled; }
 
-    /**
-     * Send a message to the warehouse agent chat endpoint.
-     *
-     * @param message    the user's question (natural language)
-     * @param sessionId  prior session ID for multi-turn context (null for new session)
-     * @param customer   optional customer hint (fuzzy — agent resolves it)
-     * @param env        optional env hint (agent extracts from message if null)
-     * @param product    optional product filter
-     */
+    @CircuitBreaker(name = "warehouseAgent", fallbackMethod = "chatFallback")
     @SuppressWarnings("unchecked")
     public AgentChatResult chat(String message, String sessionId,
-                                String customer, String env, String product) {
+                                String customer, String env, String product) throws Exception {
         if (!enabled) return null;
-        try {
-            Map<String, Object> body = new java.util.LinkedHashMap<>();
-            body.put("message", message);
-            if (sessionId != null && !sessionId.isBlank()) body.put("session_id", sessionId);
-            if (customer  != null && !customer.isBlank())  body.put("customer",   customer);
-            if (env       != null && !env.isBlank())       body.put("env",        env);
-            if (product   != null && !product.isBlank())   body.put("product",    product);
 
-            HttpRequest req = HttpRequest.newBuilder()
-                    .uri(URI.create(agentUrl + "/api/v1/chat"))
-                    .header("Content-Type", "application/json")
-                    .timeout(Duration.ofSeconds(90))
-                    .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
-                    .build();
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("message", message);
+        if (sessionId != null && !sessionId.isBlank()) body.put("session_id", sessionId);
+        if (customer  != null && !customer.isBlank())  body.put("customer",   customer);
+        if (env       != null && !env.isBlank())       body.put("env",        env);
+        if (product   != null && !product.isBlank())   body.put("product",    product);
 
-            HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() != 200) {
-                log.warn("Warehouse agent HTTP {}: {}", resp.statusCode(),
-                         resp.body().substring(0, Math.min(300, resp.body().length())));
-                return null;
-            }
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(agentUrl + "/api/v1/chat"))
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(90))
+                .POST(HttpRequest.BodyPublishers.ofString(mapper.writeValueAsString(body)))
+                .build();
 
-            Map<String, Object> r = mapper.readValue(resp.body(), Map.class);
-            return new AgentChatResult(
-                (String)  r.getOrDefault("session_id",          ""),
-                (String)  r.getOrDefault("answer",              ""),
-                (String)  r.getOrDefault("resolved_customer",   null),
-                (String)  r.getOrDefault("resolved_env",        null),
-                (String)  r.getOrDefault("lifecycle_stage",     null),
-                (String)  r.getOrDefault("lifecycle_label",     null),
-                Boolean.TRUE.equals(r.get("needs_clarification")),
-                Boolean.TRUE.equals(r.get("has_live_data")),
-                Boolean.TRUE.equals(r.get("is_operational")),
-                (List<String>) r.getOrDefault("tools_called",   List.of())
-            );
-        } catch (Exception e) {
-            log.warn("Warehouse agent call failed: {}", e.getMessage());
-            return null;
+        HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 200) {
+            throw new RuntimeException("Warehouse agent HTTP " + resp.statusCode() + ": "
+                    + resp.body().substring(0, Math.min(300, resp.body().length())));
         }
+
+        Map<String, Object> r = mapper.readValue(resp.body(), Map.class);
+        return new AgentChatResult(
+            (String)  r.getOrDefault("session_id",          ""),
+            (String)  r.getOrDefault("answer",              ""),
+            (String)  r.getOrDefault("resolved_customer",   null),
+            (String)  r.getOrDefault("resolved_env",        null),
+            (String)  r.getOrDefault("lifecycle_stage",     null),
+            (String)  r.getOrDefault("lifecycle_label",     null),
+            Boolean.TRUE.equals(r.get("needs_clarification")),
+            Boolean.TRUE.equals(r.get("has_live_data")),
+            Boolean.TRUE.equals(r.get("is_operational")),
+            (List<String>) r.getOrDefault("tools_called",   List.of())
+        );
+    }
+
+    @SuppressWarnings("unused")
+    private AgentChatResult chatFallback(String message, String sessionId,
+                                          String customer, String env, String product,
+                                          Throwable t) {
+        log.warn("Warehouse agent circuit open or failed — falling back to static RAG: {}", t.getMessage());
+        return null;
     }
 
     public record AgentChatResult(

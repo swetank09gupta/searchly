@@ -1,6 +1,7 @@
 package dev.searchly.api.client;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -15,6 +16,8 @@ import java.util.Map;
 
 /**
  * Thin client for Ollama's /api/generate endpoint (non-streaming).
+ * Protected by a circuit breaker so a downed Ollama does not make every
+ * search request block for 120 s before returning.
  */
 @Component
 public class OllamaClient {
@@ -39,13 +42,14 @@ public class OllamaClient {
 
     /**
      * Sends a prompt and returns the model's text response.
-     * Returns null if Ollama is unavailable (RAG answer will be omitted gracefully).
+     * Returns null via fallback if Ollama is unavailable (RAG answer gracefully omitted).
      */
+    @CircuitBreaker(name = "ollama", fallbackMethod = "generateFallback")
     @SuppressWarnings("unchecked")
     public String generate(String prompt) {
         try {
             Map<String, Object> body = Map.of(
-                    "model", model,
+                    "model",  model,
                     "prompt", prompt,
                     "stream", false);
 
@@ -59,14 +63,21 @@ public class OllamaClient {
 
             HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
             if (resp.statusCode() != 200) {
-                log.warn("Ollama HTTP {}: {}", resp.statusCode(), resp.body());
-                return null;
+                throw new RuntimeException("Ollama HTTP " + resp.statusCode() + ": "
+                        + resp.body().substring(0, Math.min(200, resp.body().length())));
             }
             Map<String, Object> result = mapper.readValue(resp.body(), Map.class);
             return (String) result.get("response");
+        } catch (RuntimeException re) {
+            throw re;
         } catch (Exception e) {
-            log.warn("Ollama call failed: {}", e.getMessage());
-            return null;
+            throw new RuntimeException("Ollama call failed", e);
         }
+    }
+
+    @SuppressWarnings("unused")
+    private String generateFallback(String prompt, Throwable t) {
+        log.warn("Ollama circuit open or failed — skipping LLM answer: {}", t.getMessage());
+        return null;
     }
 }

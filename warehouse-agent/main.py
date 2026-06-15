@@ -44,6 +44,7 @@ from agent import run_agent
 from auth import AuthDB, AUTH_ENABLED
 from chat_handler import ChatHandler
 from customer_registry import CustomerRegistry, LIFECYCLE_ORDER, lifecycle_label
+from eval_scheduler import EvalScheduler
 from products_config import load as load_products, ids as product_ids, product_menu
 from session import store as session_store
 
@@ -63,15 +64,17 @@ CUSTOMERS_YML   = os.getenv("CUSTOMERS_YML",   "/app/customers.yml")
 CUSTOMERS_DB    = os.getenv("CUSTOMERS_DB",    "/app/data/customers_db.json")
 AUTH_DB_PATH    = os.getenv("AUTH_DB",         "/app/data/auth_db.json")
 PRODUCTS_YML    = os.getenv("PRODUCTS_YML",    "/app/products.yml")
+EVAL_DATASET    = os.getenv("EVAL_DATASET",    "/app/eval_dataset.json")
 
-registry: CustomerRegistry
-chat:     ChatHandler
-auth_db:  AuthDB
+registry:  CustomerRegistry
+chat:      ChatHandler
+auth_db:   AuthDB
+eval_sched: EvalScheduler
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global registry, chat, auth_db
+    global registry, chat, auth_db, eval_sched
     load_products(PRODUCTS_YML)   # must be first — registry validation depends on it
     registry = CustomerRegistry(db_path=CUSTOMERS_DB)
     if os.path.exists(CUSTOMERS_YML):
@@ -85,10 +88,19 @@ async def lifespan(app: FastAPI):
         searchly_url    = SEARCHLY_URL,
         searchly_tenant = SEARCHLY_TENANT,
     )
+    eval_sched = EvalScheduler(
+        agent_url    = f"http://localhost:{os.getenv('PORT', '8084')}",
+        tenant       = SEARCHLY_TENANT,
+        dataset_path = EVAL_DATASET,
+        ollama_url   = OLLAMA_URL,
+        ollama_model = OLLAMA_MODEL,
+    )
+    eval_sched.start()
     log.info("Warehouse agent ready  ollama=%s  model=%s  customers=%d  auth=%s",
              OLLAMA_URL, OLLAMA_MODEL, len(registry.list_customers()),
              "on" if AUTH_ENABLED else "off")
     yield
+    eval_sched.stop()
 
 
 # ─── Auth helper ──────────────────────────────────────────────────────────────

@@ -185,71 +185,64 @@ async def run_agent(
             "env_used":      env_name,
         }
 
-    # ── Operational agentic loop ──────────────────────────────────────────────
-    # Inject cluster-aware customer for tools
+    # ── Operational agentic loop: Planner → Execution → Synthesis ───────────
     _RUNTIME = {
         "customer_obj":   tools_customer,
         "searchly_url":   searchly_url,
         "searchly_tenant": searchly_tenant,
     }
 
-    for round_num in range(MAX_TOOL_ROUNDS):
-        response = await _chat(ollama_url, ollama_model, messages, tools=TOOL_DEFINITIONS)
-        assistant_msg = response.get("message", {})
-        tool_calls    = assistant_msg.get("tool_calls", [])
+    # Phase 1: Planning — ask LLM what tools to call and in what order
+    tool_calls_to_run = await _plan_tools(
+        ollama_url, ollama_model, messages, tools_customer, customer_id,
+        searchly_url, searchly_tenant
+    )
 
-        if not tool_calls:
-            answer = assistant_msg.get("content", "")
-            break
+    # Phase 2: Execution — run all planned tools
+    for tc in tool_calls_to_run:
+        fn_name = tc.get("function", {}).get("name", "")
+        fn_args = tc.get("function", {}).get("arguments", {})
+        if isinstance(fn_args, str):
+            try:
+                fn_args = json.loads(fn_args)
+            except json.JSONDecodeError:
+                fn_args = {}
 
-        messages.append({"role": "assistant", **assistant_msg})
+        log.info("[plan] tool=%s args=%s", fn_name,
+                 {k: v for k, v in fn_args.items() if k not in ("grep",)})
 
-        for tc in tool_calls:
-            fn_name = tc.get("function", {}).get("name", "")
-            fn_args = tc.get("function", {}).get("arguments", {})
-            if isinstance(fn_args, str):
-                try:
-                    fn_args = json.loads(fn_args)
-                except json.JSONDecodeError:
-                    fn_args = {}
+        fn = TOOL_REGISTRY.get(fn_name)
+        result: dict
+        if fn is None:
+            result = {"error": f"Unknown tool: {fn_name}"}
+        else:
+            if fn_name in ("get_logs", "get_deployment_state",
+                           "get_pod_status", "list_log_indices"):
+                fn_args["customer_obj"] = _RUNTIME["customer_obj"]
+                fn_args.pop("customer_id", None)
+            elif fn_name == "search_knowledge":
+                fn_args.setdefault("searchly_url",   _RUNTIME["searchly_url"])
+                fn_args.setdefault("tenant",         _RUNTIME["searchly_tenant"])
+                fn_args.setdefault("customer_id",    customer_id)
+            try:
+                result = await fn(**fn_args)
+            except Exception as e:
+                log.warning("Tool %s failed: %s", fn_name, e)
+                result = {"error": str(e)}
 
-            log.info("[round %d] tool=%s args=%s", round_num + 1, fn_name,
-                     {k: v for k, v in fn_args.items() if k not in ("grep",)})
-
-            fn = TOOL_REGISTRY.get(fn_name)
-            result: dict
-            if fn is None:
-                result = {"error": f"Unknown tool: {fn_name}"}
-            else:
-                # Inject runtime constants the model shouldn't have to supply
-                if fn_name in ("get_logs", "get_deployment_state",
-                               "get_pod_status", "list_log_indices"):
-                    # Replace customer_id with the resolved customer obj
-                    fn_args["customer_obj"] = _RUNTIME["customer_obj"]
-                    fn_args.pop("customer_id", None)
-                elif fn_name == "search_knowledge":
-                    fn_args.setdefault("searchly_url",   _RUNTIME["searchly_url"])
-                    fn_args.setdefault("tenant",         _RUNTIME["searchly_tenant"])
-                    fn_args.setdefault("customer_id",    customer_id)
-                try:
-                    result = await fn(**fn_args)
-                except Exception as e:
-                    log.warning("Tool %s failed: %s", fn_name, e)
-                    result = {"error": str(e)}
-
-            tools_called.append(fn_name)
-            tool_results[fn_name] = result
-            messages.append({
-                "role":    "tool",
-                "content": json.dumps(result, default=str)[:8000],
-            })
-    else:
-        # Hit max rounds — ask for final synthesis
+        tools_called.append(fn_name)
+        tool_results[fn_name] = result
         messages.append({
-            "role":    "user",
-            "content": "Based on all the data gathered, give your final answer."
+            "role":    "tool",
+            "content": json.dumps(result, default=str)[:8000],
         })
-        answer = await _generate(ollama_url, ollama_model, messages, tools=None)
+
+    # Phase 3: Synthesis — generate the final answer from all gathered evidence
+    messages.append({
+        "role":    "user",
+        "content": "Based on all the data gathered above, give your final answer."
+    })
+    answer = await _generate(ollama_url, ollama_model, messages, tools=None)
 
     return {
         "answer":          (answer or "").strip() or _no_answer(stage, question),
@@ -258,6 +251,54 @@ async def run_agent(
         "is_operational":  True,
         "env_used":        env_name,
     }
+
+
+async def _plan_tools(
+    ollama_url: str, ollama_model: str, messages: list[dict],
+    tools_customer: dict | None, customer_id: str | None,
+    searchly_url: str, searchly_tenant: str,
+) -> list[dict]:
+    """
+    Planner phase: ask the LLM to generate a list of tool calls without executing them.
+    Returns a list of {function: {name, arguments}} dicts, capped at MAX_TOOL_ROUNDS.
+    Falls back to an empty list on failure (caller then skips to synthesis with no tool data).
+    """
+    plan_messages = messages + [{
+        "role":    "user",
+        "content": (
+            "Before answering, decide which tools you need to call and in what order. "
+            "Reply with ONLY a JSON array of tool calls, no explanation. Format:\n"
+            '[{"function":{"name":"<tool>","arguments":{<args>}}}, ...]\n'
+            "Limit to at most 5 tool calls. Available tools: "
+            + ", ".join(TOOL_DEFINITIONS[t]["function"]["name"]
+                        if isinstance(TOOL_DEFINITIONS[t], dict) else TOOL_DEFINITIONS[t].get("function", {}).get("name", "")
+                        for t in range(len(TOOL_DEFINITIONS)))
+        ),
+    }]
+    try:
+        raw = await _generate(ollama_url, ollama_model, plan_messages, tools=None)
+        if not raw:
+            return []
+        # Extract the JSON array from the response
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not m:
+            return []
+        tool_calls = json.loads(m.group(0))
+        if not isinstance(tool_calls, list):
+            return []
+        # Validate and cap
+        valid = []
+        for tc in tool_calls[:MAX_TOOL_ROUNDS]:
+            if isinstance(tc, dict) and "function" in tc:
+                fn_name = tc["function"].get("name", "")
+                if fn_name in TOOL_REGISTRY:
+                    valid.append(tc)
+        log.info("Planner produced %d tool calls: %s",
+                 len(valid), [tc["function"]["name"] for tc in valid])
+        return valid
+    except Exception as e:
+        log.debug("Planner failed (falling back to synthesis only): %s", e)
+        return []
 
 
 def _find_env_name(customer_record: dict | None, env_config: dict | None) -> str | None:

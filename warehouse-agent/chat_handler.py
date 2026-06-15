@@ -40,6 +40,8 @@ import logging
 import re
 from typing import Any
 
+import httpx
+
 from agent import run_agent
 from customer_registry import CustomerRegistry, LIFECYCLE_ORDER, lifecycle_label
 from entity_extractor import extract_entities
@@ -182,6 +184,10 @@ class ChatHandler:
 
         answer = agent_result["answer"] + confirm_note
         session.add_turn("agent", answer)
+
+        # Compress history if it has grown long
+        if session.needs_compression():
+            await self._compress_session_history(session)
 
         return {
             "session_id":         session.id,
@@ -369,6 +375,64 @@ class ChatHandler:
         return None
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
+
+    async def _compress_session_history(self, session) -> None:
+        """
+        Summarize older turns into rolling_summary + structured_memory via Ollama.
+        Extracts machine-readable facts (customer, env, issue, findings) separately
+        from the prose summary so downstream code can use them without parsing text.
+        """
+        older_turns = session.history[:-5]
+        if not older_turns:
+            return
+        turns_text = "\n".join(
+            f"{t['role'].upper()}: {t['content'][:500]}" for t in older_turns
+        )
+        existing = f"\nExisting summary:\n{session.rolling_summary}\n" if session.rolling_summary else ""
+
+        prompt = (
+            "Analyze this warehouse support conversation and output TWO sections.\n\n"
+            "SECTION 1 — PROSE SUMMARY:\n"
+            "One paragraph summarizing what happened, what was found, and current status.\n\n"
+            "SECTION 2 — STRUCTURED JSON (valid JSON only, no markdown):\n"
+            '{"customer":"<id or null>","environment":"<prod/staging/dev or null>",'
+            '"active_issue":"<one sentence or null>","investigation_state":"<what was tried or null>",'
+            '"known_findings":["<finding1>","<finding2>"],"resolved":<true or false>}\n\n'
+            f"{existing}"
+            f"Conversation:\n{turns_text}\n\n"
+            "SECTION 1 — PROSE SUMMARY:"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{self.ollama_url}/api/generate",
+                    json={"model": self.ollama_model, "prompt": prompt, "stream": False},
+                )
+                if resp.status_code != 200:
+                    return
+                raw = resp.json().get("response", "").strip()
+                if not raw:
+                    return
+
+            # Split on "SECTION 2" marker
+            parts = re.split(r"SECTION\s+2[^:]*:", raw, maxsplit=1, flags=re.IGNORECASE)
+            summary = parts[0].strip()
+            structured: dict | None = None
+            if len(parts) > 1:
+                json_text = parts[1].strip()
+                m = re.search(r"\{.*\}", json_text, re.DOTALL)
+                if m:
+                    try:
+                        import json as _json
+                        structured = _json.loads(m.group(0))
+                    except Exception:
+                        pass
+
+            session.apply_compression(summary, structured)
+            log.debug("Compressed session %s: %d turns → summary + structured memory",
+                      session.id, len(older_turns))
+        except Exception as e:
+            log.debug("History compression failed (non-fatal): %s", e)
 
     def _resolve_env_config(self, customer_id: str | None, env_hint: str | None
                              ) -> tuple[dict, dict | None, str | None]:

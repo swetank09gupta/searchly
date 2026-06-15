@@ -1,136 +1,87 @@
 package dev.searchly.indexer;
 
 import dev.searchly.common.IndexingEvent;
-import dev.searchly.common.Tier;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
-import java.util.Map;
 
 /**
- * Consumes indexing events and writes to OpenSearch.
- * Idempotent: doc_id is the OpenSearch document id (upsert semantics).
+ * Consumes indexing events from the main topics and writes to OpenSearch.
  *
- * All OpenSearch I/O goes through ChunkIndexClient which uses Java's built-in
- * HttpClient with HTTP/1.1. This avoids the Apache HttpClient5 IO reactor
- * (ApacheHttpClient5TransportBuilder) which suffered from repeated
- * OutOfMemoryError in validateActiveChannels even on tiny documents.
+ * Batch mode (P0.6): up to 500 records per poll are bulk-indexed in a single
+ * OpenSearch _bulk request for 10-50× throughput improvement.
  *
- * After writing the full document (keyword search), the content is also chunked,
- * embedded, and written to the chunks-* index for RAG / semantic search.
- * Embedding failures are non-fatal — the document remains keyword-searchable.
+ * Failure handling (P0.1): a failed batch is retried per-document; each
+ * failed document is routed to indexing.retry1/2/3 then indexing.dlq via
+ * RetryPublisher — no poison message loops.
+ *
+ * Offset is always committed (no rethrow) so a bad document cannot wedge
+ * the consumer.  Retry topics provide persistent, delay-gated re-delivery.
  */
 @Component
 public class IndexingConsumer {
     private static final Logger log = LoggerFactory.getLogger(IndexingConsumer.class);
 
-    private final ChunkIndexClient osClient;
-    private final ChunkingService chunker;
-    private final EmbeddingClient embedder;
+    private final IndexingProcessor processor;
+    private final RetryPublisher retryPublisher;
 
-    public IndexingConsumer(ChunkIndexClient osClient,
-                            ChunkingService chunker,
-                            EmbeddingClient embedder) {
-        this.osClient = osClient;
-        this.chunker  = chunker;
-        this.embedder = embedder;
+    public IndexingConsumer(IndexingProcessor processor, RetryPublisher retryPublisher) {
+        this.processor     = processor;
+        this.retryPublisher = retryPublisher;
     }
 
-    @KafkaListener(topicPattern = "indexing\\.shared|indexing\\.enterprise\\..+", groupId = "indexer")
-    public void onMessage(IndexingEvent event) {
+    @KafkaListener(
+            topicPattern    = "indexing\\.shared|indexing\\.enterprise\\..+",
+            groupId         = "indexer",
+            containerFactory = "batchKafkaListenerContainerFactory")
+    public void onMessages(List<ConsumerRecord<String, IndexingEvent>> records) {
+        if (records.isEmpty()) return;
+
+        List<IndexingEvent> events = records.stream()
+                .map(ConsumerRecord::value)
+                .filter(e -> e != null)
+                .toList();
+
         try {
-            String docIdx   = docIndexName(event);
-            String chunkIdx = chunkIndexName(event);
-
-            osClient.indexDocument(
-                    docIdx,
-                    event.tenantId(),
-                    event.docId(),
-                    event.title(),
-                    event.content(),
-                    event.metadata(),
-                    event.createdAt().toString());
-
-            indexChunks(event, chunkIdx);
-
+            processor.processBatch(events);
+            log.info("Bulk-indexed {} docs", events.size());
+            return;
         } catch (OutOfMemoryError oom) {
-            // Catching OutOfMemoryError to advance the Kafka offset (not rethrow)
-            // so the container stays alive and moves past this message.
             Runtime rt = Runtime.getRuntime();
-            log.error("OOM processing doc {} type='{}' msg='{}' heap: free={}MB total={}MB max={}MB",
-                    event.docId(), oom.getClass().getName(), oom.getMessage(),
+            log.error("OOM during batch index — heap: free={}MB total={}MB max={}MB. Falling back to per-doc.",
                     rt.freeMemory() / 1024 / 1024,
                     rt.totalMemory() / 1024 / 1024,
                     rt.maxMemory() / 1024 / 1024);
             System.gc();
         } catch (Exception e) {
-            log.error("Failed to index {}: {}", event.docId(), e.getMessage(), e);
-            throw new RuntimeException(e);
-        }
-    }
-
-    private void indexChunks(IndexingEvent event, String chunkIdx) {
-        String fullText = buildTextForEmbedding(event);
-        List<String> chunks = chunker.chunk(fullText);
-        if (chunks.isEmpty()) return;
-
-        Runtime rt = Runtime.getRuntime();
-        long freeM  = rt.freeMemory()  / 1024 / 1024;
-        long totalM = rt.totalMemory() / 1024 / 1024;
-        long maxM   = rt.maxMemory()   / 1024 / 1024;
-        log.info("heap before embed: free={}MB total={}MB max={}MB chunks={} doc={}",
-                freeM, totalM, maxM, chunks.size(), event.docId());
-
-        List<List<Double>> vectors = embedder.embed(chunks);
-        if (vectors.isEmpty()) {
-            log.warn("Embedding unavailable for doc {} — skipping chunk index", event.docId());
-            return;
+            log.warn("Batch indexing failed ({}), falling back to per-doc: {}",
+                    records.size(), e.getMessage());
         }
 
-        Map<String, Object> metadata = event.metadata() != null ? event.metadata() : Map.of();
-        for (int i = 0; i < chunks.size(); i++) {
-            List<Double> vec = i < vectors.size() ? vectors.get(i) : null;
-            if (vec == null) continue;
-            osClient.indexChunk(
-                    chunkIdx,
-                    event.tenantId(),
-                    event.docId(),
-                    i,
-                    event.title(),
-                    chunks.get(i),
-                    vec,
-                    metadata,
-                    event.createdAt().toString());
+        // Batch failed — process each document individually so only bad docs go to retry
+        for (ConsumerRecord<String, IndexingEvent> record : records) {
+            IndexingEvent event = record.value();
+            if (event == null) continue;
+            try {
+                processor.process(event);
+            } catch (OutOfMemoryError oom) {
+                Runtime rt = Runtime.getRuntime();
+                log.error("OOM processing doc={} heap: free={}MB total={}MB max={}MB",
+                        event.docId(),
+                        rt.freeMemory() / 1024 / 1024,
+                        rt.totalMemory() / 1024 / 1024,
+                        rt.maxMemory() / 1024 / 1024);
+                System.gc();
+                retryPublisher.handleFailure(record, new RuntimeException("OOM", oom));
+            } catch (Exception ex) {
+                log.error("Failed to index doc={}: {}", event.docId(), ex.getMessage(), ex);
+                retryPublisher.handleFailure(record, ex);
+            }
+            // No rethrow — offset always committed; retry topics handle re-delivery.
         }
-        log.info("Indexed {} chunks for doc {} in {}", chunks.size(), event.docId(), chunkIdx);
-    }
-
-    // Max chars to embed — caps embedding payload size. Documents are split upstream
-    // (split_doc in sync.py) so this truncation should rarely fire, but kept as
-    // a last-resort guard against unexpectedly large content.
-    private static final int MAX_EMBED_CHARS = 750_000;
-
-    // Embed title + content together so the title context carries into each chunk's vector.
-    // Truncate content BEFORE concatenation to avoid huge intermediate strings.
-    private String buildTextForEmbedding(IndexingEvent event) {
-        String title   = event.title()   != null ? event.title()   : "";
-        String content = event.content() != null ? event.content() : "";
-        if (content.length() > MAX_EMBED_CHARS) {
-            log.warn("Doc {} content truncated from {} to {} chars for chunking",
-                    event.docId(), content.length(), MAX_EMBED_CHARS);
-            content = content.substring(0, MAX_EMBED_CHARS);
-        }
-        return title.isBlank() ? content : title + "\n\n" + content;
-    }
-
-    private String docIndexName(IndexingEvent e) {
-        return e.tier() == Tier.ENTERPRISE ? "documents-" + e.tenantId() : "documents-shared";
-    }
-
-    private String chunkIndexName(IndexingEvent e) {
-        return e.tier() == Tier.ENTERPRISE ? "chunks-" + e.tenantId() : "chunks-shared";
     }
 }

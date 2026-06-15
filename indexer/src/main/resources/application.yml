@@ -15,6 +15,12 @@ spring:
         spring.json.trusted.packages: "dev.searchly.common"
         spring.json.value.default.type: dev.searchly.common.IndexingEvent
         metadata.max.age.ms: 5000
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      properties:
+        enable.idempotence: "true"
 
 searchly:
   opensearch:
@@ -23,6 +29,11 @@ searchly:
     scheme: http
   embedding:
     url: ${EMBEDDING_SERVICE_URL:http://localhost:8083}
+  kafka:
+    retry1-topic: indexing.retry1
+    retry2-topic: indexing.retry2
+    retry3-topic: indexing.retry3
+    dlq-topic: indexing.dlq
 
 management:
   endpoints:
