@@ -67,7 +67,7 @@ public class DocumentService {
 
         IndexingEvent event = new IndexingEvent(
                 id.toString(), ctx.tenantId(), ctx.tier(),
-                req.title(), req.content(), req.metadata(), now, idempotencyKey);
+                req.title(), req.content(), req.metadata(), now.toEpochMilli(), idempotencyKey);
 
         String topic = ctx.tier().name().equals("ENTERPRISE")
                 ? enterprisePrefix + ctx.tenantId()
