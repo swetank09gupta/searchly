@@ -174,9 +174,11 @@ services:
       KAFKA_BOOTSTRAP: kafka:9092
       OPENSEARCH_HOST: opensearch
       EMBEDDING_SERVICE_URL: http://embedding-service:8083
-      # 37GB available on this VM — give indexer 4GB so even the largest
-      # Confluence docs (multi-MB content) don't OOM during deserialization.
-      JAVA_TOOL_OPTIONS: "-Xmx4g -Xms256m"
+      # ZGC (JDK 21, stable): no humongous-object consecutive-region constraint.
+      # G1GC with 256m Xms and 1MB regions (humongous threshold 512KB) was
+      # OOMing for tiny docs (240MB free) due to heap fragmentation after
+      # repeated minor GC cycles. ZGC avoids this entirely.
+      JAVA_TOOL_OPTIONS: "-Xmx4g -Xms256m -XX:+UseZGC"
     depends_on:
       opensearch:        { condition: service_healthy }
       kafka:             { condition: service_healthy }
