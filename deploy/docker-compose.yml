@@ -8,6 +8,10 @@ services:
       POSTGRES_PASSWORD: searchly
       POSTGRES_DB: searchly
     ports: ["5432:5432"]
+    deploy:
+      resources:
+        limits:
+          memory: 512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U searchly"]
       interval: 5s
@@ -17,6 +21,10 @@ services:
   redis:
     image: redis:7-alpine
     ports: ["6380:6379"]
+    deploy:
+      resources:
+        limits:
+          memory: 256m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -34,6 +42,10 @@ services:
     ulimits:
       memlock: { soft: -1, hard: -1 }
     ports: ["9200:9200"]
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     healthcheck:
       test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -E 'green|yellow'"]
       interval: 10s
@@ -58,6 +70,10 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
     ports: ["9092:9092", "29092:29092"]
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -71,6 +87,10 @@ services:
       context: ../embedding-service
       dockerfile: Dockerfile
     ports: ["18083:8083"]
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8083/health || exit 1"]
       interval: 10s
@@ -88,6 +108,10 @@ services:
     ports: ["11434:11434"]
     volumes:
       - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        limits:
+          memory: 5g
     healthcheck:
       test: ["CMD-SHELL", "ollama list > /dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -132,6 +156,10 @@ services:
       # SSH key for kubectl bastion access (mount your actual key)
       - ${SSH_KEY_PATH:-~/.ssh/id_rsa}:/root/.ssh/id_rsa:ro
     ports: ["18084:8084"]
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     depends_on:
       ollama: { condition: service_healthy }
     healthcheck:
@@ -157,6 +185,10 @@ services:
       # Intelligence agent URL — enables live operational query routing
       WAREHOUSE_AGENT_URL: http://intelligence-agent:8084
     ports: ["8081:8081"]
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     depends_on:
       postgres:          { condition: service_healthy }
       redis:             { condition: service_healthy }
@@ -174,6 +206,10 @@ services:
       KAFKA_BOOTSTRAP: kafka:9092
       OPENSEARCH_HOST: opensearch
       EMBEDDING_SERVICE_URL: http://embedding-service:8083
+    deploy:
+      resources:
+        limits:
+          memory: 512m
     depends_on:
       opensearch:        { condition: service_healthy }
       kafka:             { condition: service_healthy }
@@ -187,6 +223,10 @@ services:
       REDIS_HOST: redis
       SEARCH_API_URI: http://search-api:8081
     ports: ["18080:8080"]
+    deploy:
+      resources:
+        limits:
+          memory: 512m
     depends_on:
       redis:      { condition: service_healthy }
       search-api: { condition: service_started }
@@ -215,6 +255,10 @@ services:
     volumes:
       # .sync_state.json persists here so incremental indexing survives restarts
       - sync-state:/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g
     depends_on:
       search-api: { condition: service_started }
     restart: unless-stopped
