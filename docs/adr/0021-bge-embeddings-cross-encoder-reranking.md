@@ -34,7 +34,7 @@ Every user query generates **two** query vectors:
 Query rewriting is **additive** — the rewrite adds recall via alternative vocabulary, not a
 replacement that might change query semantics.
 
-### Stage 2 — 6-leg parallel retrieval with source authority weighting
+### Stage 2 — 6-leg retrieval with source authority weighting (sequential today; target: parallel via CompletableFuture — Sprint 1.1)
 
 Run six retrieval legs:
 
@@ -104,7 +104,7 @@ for lineage tracking (see ADR 0023).
 
 **Negative**
 - Query rewriting adds ~600ms median latency (Ollama call). Total RAG path grows from ~1s to ~5s.
-- Cross-encoder `bge-reranker-base` is ~280 MB on disk; adds ~500ms/30 pairs at CPU inference.
+- Cross-encoder `bge-reranker-base` is ~280 MB on disk; adds ~300ms/30 pairs at CPU inference (p50).
 - Model change requires a full re-embed of all existing chunks (one-time migration; no index
   schema change since 384-dim is unchanged).
 

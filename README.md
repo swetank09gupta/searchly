@@ -75,7 +75,7 @@ Intelligence Agent (FastAPI :8084)
     └── Knowledge Graph (Postgres) — Jira↔PR↔commit↔service relationships
 
 Sync Cron (every 4h):
-    Jira projects       → OpenSearch  [+ kg_entities / kg_relationships via remote links]
+    Jira projects       → OpenSearch  [KG extraction NOT yet wired — graph is empty]
     Confluence spaces   → OpenSearch  [recursive child pages]
     GitHub repos        → OpenSearch  [SHA-incremental, only changed repos]
     ADRs / design docs  → OpenSearch  [kept whole, not split]

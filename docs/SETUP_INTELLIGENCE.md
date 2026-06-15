@@ -291,7 +291,7 @@ docker system prune -f
 | 8084 | Intelligence Agent + Chat UI |
 | 8081 | Search API (BM25 + kNN) |
 | 9200 | OpenSearch |
-| 8083 | Embedding service |
+| 8083 | Embedding service — `POST /embed` (BGE `bge-small-en-v1.5`, 384-dim) + `POST /rerank` (cross-encoder `bge-reranker-base`) |
 | 11434 | Ollama LLM |
 | 5432 | PostgreSQL |
 | 6379 | Redis |

@@ -33,7 +33,7 @@ What it would take to evolve the Searchly prototype into a service that can be o
 | **Timeouts** | All external calls — search 400ms, blob fetch 5s, Tika 30s |
 | **Bulkheads** | Separate thread pools per downstream and per tier |
 | **Fallbacks** | Cache stale on OpenSearch outage; degraded "metadata-only" search from Postgres |
-| **Dead-letter queue** | Poison Kafka messages → `indexing.dlq` with replay tooling |
+| **Dead-letter queue** | `indexing.dlq` topic defined; **Indexer DLQ routing not yet implemented** — poison messages crash the consumer (known gap, Sprint 3.1); replay tooling designed |
 | **Idempotency** | Client `Idempotency-Key` header; doc_id reused on retry |
 | **Graceful shutdown** | Drain Kafka consumers, finish in-flight HTTP, deregister from LB |
 | **Chaos testing** | Litmus / Chaos Mesh on K8s; quarterly game days |

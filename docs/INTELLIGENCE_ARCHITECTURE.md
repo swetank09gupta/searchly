@@ -46,10 +46,10 @@ environment.
          │                      │                          │
          ▼                      ▼                          ▼
 ┌─────────────────┐  ┌───────────────────┐  ┌─────────────────────────┐
-│  OpenSearch     │  │  Ollama (LLM)     │  │  Elasticsearch (ECK)    │
-│  BM25 + kNN     │  │  runs on CPU      │  │  Filebeat → Logstash    │
-│  shared index   │  │  ~20-40s / query  │  │  live application logs  │
-│  "chunks"       │  └───────────────────┘  └──────────┬──────────────┘
+│  OpenSearch          │  │  Ollama (LLM)     │  │  Elasticsearch (ECK)    │
+│  BM25 + kNN (HNSW)  │  │  runs on CPU      │  │  Filebeat → Logstash    │
+│  documents-* (BM25) │  │  ~4-5s / query    │  │  live application logs  │
+│  chunks-*   (kNN)   │  └───────────────────┘  └──────────┬──────────────┘
 └─────────────────┘                                     │ Mode A (bastion-kubectl)
          ▲                                              │ fetches ES password at runtime
          │ index writes                                 ▼

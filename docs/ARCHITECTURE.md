@@ -46,29 +46,40 @@ Client → Gateway → search-api ──► Postgres (SoR)
                        │   Spring Cloud Gateway   │
                        │  (TLS, AuthN, Rate Limit,│
                        │   CORS, Routing, Headers)│
-                       └─────┬─────────────┬──────┘
-                             │             │
-                  ┌──────────▼──┐    ┌─────▼──────────┐
-                  │  Search API │    │  Admin API     │
-                  │ (read+write)│    │ (tenants/users)│
-                  └─┬───┬───┬───┘    └────────────────┘
-                    │   │   │
-        ┌───────────┘   │   └─────────────────────────┐
-        ▼               ▼                             ▼
-  ┌──────────┐    ┌──────────┐                 ┌────────────┐
-  │  Redis   │    │OpenSearch│                 │ PostgreSQL │
-  │ (cache + │    │ (search) │                 │ (metadata, │
-  │  rate    │    └──────────┘                 │  SoR, ACL) │
-  │  limit)  │                                 └────────────┘
-  └──────────┘
+                       └─────────────┬────────────────┘
+                                     │
+                          ┌──────────▼──────────┐
+                          │      Search API      │
+                          │   (read + write)     │
+                          └──┬────┬────┬─────────┘
+                             │    │    │
+             ┌───────────────┘    │    └────────────────────┐
+             ▼                    ▼                         ▼
+  ┌──────────────┐      ┌──────────────┐          ┌──────────────────┐
+  │    Redis     │      │  OpenSearch  │          │   PostgreSQL     │
+  │ (cache +     │      │ documents-*  │          │ tenants, users,  │
+  │  rate limit) │      │ chunks-*     │          │ doc metadata,    │
+  └──────────────┘      │ (BM25+kNN)   │          │ ACLs, quotas,    │
+                        └──────────────┘          │ kg_entities,     │
+                                                  │ kg_relationships │
+                                                  └──────────────────┘
         │
         │   (writes: doc upload)
         ▼
-   ┌─────────┐      ┌──────────┐      ┌──────────────┐
-   │ MinIO/  │◄─────│Kafka     │─────►│  Indexer     │
-   │  S3     │      │(tiered   │      │ (Tika extract│
-   │ (blobs) │      │ topics)  │      │  → OpenSearch│
-   └─────────┘      └──────────┘      └──────────────┘
+   ┌─────────┐      ┌──────────┐      ┌──────────────────────────┐
+   │ MinIO/  │◄─────│Kafka     │─────►│  Indexer                 │
+   │  S3     │      │(tiered   │      │ (Tika → chunk → embed    │
+   │ (blobs) │      │ topics)  │      │  via Embedding Svc :8083 │
+   └─────────┘      └──────────┘      │  → documents-*+chunks-*) │
+                                      └──────────────────────────┘
+                                               │ POST /embed
+                                               ▼
+                                      ┌──────────────────────────┐
+                                      │   Embedding Service      │
+                                      │  :8083                   │
+                                      │  POST /embed  (BGE)      │
+                                      │  POST /rerank (reranker) │
+                                      └──────────────────────────┘
 
   Cross-cutting:  Keycloak (OIDC) │ Jaeger (OTel) │ Prometheus + Grafana
 ```
@@ -79,9 +90,10 @@ Client → Gateway → search-api ──► Postgres (SoR)
 |---|---|
 | **Gateway** | TLS termination, JWT validation, per-tenant sliding-window rate limit, request routing, security headers, request size limits |
 | **Search API** | Document CRUD, query orchestration, cache lookup, tenant/RBAC enforcement, write to Postgres + MinIO + Kafka |
-| **Indexer** | Kafka consumer; fetches blob, runs Tika, writes to OpenSearch; idempotent; per-tier consumer pools |
-| **OpenSearch** | Full-text index, relevance scoring (BM25), fuzzy/highlight/facets |
-| **PostgreSQL** | System of record for tenants, users, document metadata, ACLs, quotas |
+| **Indexer** | Kafka consumer; fetches blob, runs Tika, chunks text (1500 chars, 200-char overlap, sentence-aware), calls Embedding Service to embed chunks (50/request), writes full doc to `documents-*` and chunk vectors + `embedding_version` to `chunks-*`; idempotent (content-fingerprint SHA-256 check); per-tier consumer pools |
+| **Embedding Service** | FastAPI at `:8083`; `POST /embed` serves `BAAI/bge-small-en-v1.5` (384-dim, asymmetric query prefix); `POST /rerank` serves `BAAI/bge-reranker-base` cross-encoder for RAG reranking |
+| **OpenSearch** | Full-text BM25 index (`documents-*`), kNN HNSW vector index (`chunks-*`, 384-dim), fuzzy/highlight/facets/aggregations |
+| **PostgreSQL** | System of record for tenants, users, document metadata, ACLs, quotas, and knowledge graph (`kg_entities`, `kg_relationships`) |
 | **Redis** | Query result cache, sliding-window rate limit counters, tenant-config cache |
 | **MinIO / S3** | Immutable raw document blobs; server-side encryption |
 | **Kafka** | Async indexing; tiered topics for noisy-neighbor isolation |
@@ -107,12 +119,16 @@ Search API
 Indexer (consumer)
   ├─ Pull blob from MinIO
   ├─ Tika text extraction (with size/time limits)
-  ├─ Build OpenSearch doc {tenant_id, content, metadata, acl}
-  ├─ INDEX with routing=tenant_id  ──► OpenSearch
+  ├─ Content fingerprint check (SHA-256) — skip chunk re-embed if unchanged
+  ├─ Write full doc ──► OpenSearch documents-* (routing=tenant_id)
+  ├─ Chunk text (1500 chars, 200-char overlap, sentence-aware)
+  │     ADR/architecture files kept whole if < 12K chars
+  ├─ Batch embed chunks (50/request) ──► Embedding Service POST /embed
+  ├─ Write chunk vectors ──► OpenSearch chunks-* (embedding + embedding_version)
   └─ UPDATE Postgres status=INDEXED + emit audit event
 ```
 
-**Failure handling:** Kafka retries with exponential backoff; poison messages → DLQ topic; status field in Postgres lets clients poll.
+**Failure handling:** Kafka retries with exponential backoff; `indexing.dlq` topic is defined for poison messages but **DLQ routing is not yet implemented in the Indexer** — a poison message currently crashes the consumer (known gap, Sprint 3.1); status field in Postgres lets clients poll.
 
 ### Search (read path)
 
@@ -126,7 +142,8 @@ Search API
   │   HIT  ──► return (with X-Cache: HIT)
   ├─ MISS:
   │   Build query (typed OpenSearch DSL, never string concat)
-  │   Inject mandatory tenant_id filter + ACL terms
+  │   Inject mandatory tenant_id filter
+  │   NOTE: acl_users/acl_roles fields exist in OpenSearch but are NOT enforced here (known gap, Sprint 2.1)
   │   Submit to OpenSearch (timeout 400ms, circuit-breaker)
   ├─ Hydrate hits with stored fields (avoid extra Postgres roundtrip)
   ├─ Cache SET ttl=60s
@@ -139,7 +156,7 @@ Search API
 
 | Layer | Choice | Why |
 |---|---|---|
-| **Search engine** | OpenSearch | Mature inverted index, BM25, fuzzy, highlights, facets, horizontal scale via sharding; Apache-licensed fork avoids ES license risk |
+| **Search engine** | OpenSearch | Mature inverted index (BM25, fuzzy, highlights, facets) + HNSW kNN vector index for semantic search; horizontal scale via sharding; Apache-licensed fork avoids ES license risk |
 | **System of record** | PostgreSQL | ACID for tenants/users/quotas/ACLs; OpenSearch is rebuildable from blobs + Postgres |
 | **Blob store** | MinIO local, S3/GCS prod | Decouples large binaries from index; cheap, durable, server-side encryption; presigned URLs |
 | **Cache** | Redis | Low-latency query cache + atomic sorted-set operations for sliding-window rate limiting |
@@ -258,7 +275,7 @@ Response 200:
 - **Topics:**
   - `indexing.shared` (12 partitions, RF=3) — FREE/STANDARD tenants
   - `indexing.enterprise.{tenant_id}` (per-tenant, sized to load) — ENTERPRISE
-  - `indexing.dlq` — poison messages after N retries
+  - `indexing.dlq` — designed for poison messages after N retries; **Indexer DLQ routing not yet implemented** (known gap, Sprint 3.1)
   - `audit.events` — security/audit log
 - **Partitioning:** `tenant_id` as key on shared topic → ordering per tenant.
 - **Consumer groups:** `indexer-shared`, `indexer-enterprise-{tenant}` — independent scaling, no head-of-line blocking across tiers.
