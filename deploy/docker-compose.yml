@@ -209,7 +209,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 8g
+          memory: 1g
     restart: unless-stopped
     depends_on:
       opensearch:        { condition: service_healthy }
