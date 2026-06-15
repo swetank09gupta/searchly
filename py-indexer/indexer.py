@@ -13,7 +13,6 @@ no ZGC allocation stall, no JVM Keep-Alive-Timer OOM.
 import json
 import logging
 import os
-import re
 import sys
 import time
 
@@ -252,7 +251,7 @@ def main():
     })
 
     consumer.subscribe(
-        [re.compile(r"^indexing\.(shared|enterprise\..+)$")],
+        [r"^indexing\.(shared|enterprise\..+)$"],
         on_assign=lambda c, ps: log.info(
             "Assigned partitions: %s", [f"{p.topic}[{p.partition}]" for p in ps]
         ),
