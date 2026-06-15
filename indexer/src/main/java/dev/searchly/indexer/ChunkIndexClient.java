@@ -18,9 +18,14 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Manages the chunks-* OpenSearch indices (k-NN enabled) and writes chunk documents.
- * Uses raw HTTP because opensearch-java's typed DSL does not expose the knn_vector
- * mapping type or the index-level knn:true setting.
+ * Manages all OpenSearch indices and documents using raw HTTP (Java built-in HttpClient).
+ *
+ * Handles both full-document indices (documents-*) for keyword search and
+ * k-NN chunk indices (chunks-*) for semantic/RAG search.
+ *
+ * Raw HTTP is used throughout to avoid the Apache HttpClient5 IO reactor
+ * (ApacheHttpClient5TransportBuilder) which OOMs under load due to channel
+ * accumulation in validateActiveChannels, even with small documents.
  */
 @Component
 public class ChunkIndexClient {
@@ -29,7 +34,10 @@ public class ChunkIndexClient {
 
     private final String osBase;
     private final ObjectMapper mapper;
+    // Force HTTP/1.1 — OpenSearch 2.x speaks HTTP/1.1; HTTP/2 upgrade causes body-null issues
+    // and the selector/dispatch threads can OOM under sustained load.
     private final HttpClient http;
+    private final Set<String> ensuredDocIndices   = ConcurrentHashMap.newKeySet();
     private final Set<String> ensuredChunkIndices = ConcurrentHashMap.newKeySet();
 
     public ChunkIndexClient(
@@ -41,7 +49,48 @@ public class ChunkIndexClient {
         this.mapper = mapper;
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
+                .version(HttpClient.Version.HTTP_1_1)   // avoids HTTP/2 IO reactor OOMs
                 .build();
+    }
+
+    // ── Full-document indexing (documents-* indices, BM25 keyword search) ──────
+
+    /**
+     * Upserts a full document into the documents-* index for keyword search.
+     * doc_id is used as the OpenSearch document id (idempotent / upsert semantics).
+     */
+    public void indexDocument(String index, String tenantId, String docId,
+                              String title, String content,
+                              Map<String, Object> metadata, String createdAt) throws Exception {
+        ensureDocumentIndex(index);
+
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("tenant_id", tenantId);
+        doc.put("title",     title);
+        doc.put("content",   content);
+        doc.put("metadata",  metadata != null ? metadata : Map.of());
+        doc.put("created_at", createdAt);
+
+        String url = osBase + "/" + index + "/_doc/" + docId + "?routing=" + tenantId;
+        put(url, mapper.writeValueAsString(doc));
+        log.info("Indexed doc {} for tenant {} in {}", docId, tenantId, index);
+    }
+
+    private void ensureDocumentIndex(String index) throws Exception {
+        if (ensuredDocIndices.contains(index)) return;
+        if (indexExists(index)) { ensuredDocIndices.add(index); return; }
+
+        String body = mapper.writeValueAsString(Map.of(
+                "settings", Map.of(
+                        "index", Map.of(
+                                "number_of_shards",   "3",
+                                "number_of_replicas", "0"   // single-node: 0 replicas → green
+                        )
+                )
+        ));
+        put(osBase + "/" + index, body);
+        log.info("Created document index: {}", index);
+        ensuredDocIndices.add(index);
     }
 
     public void indexChunk(String chunkIndex, String tenantId, String docId, int chunkIdx,
@@ -71,21 +120,20 @@ public class ChunkIndexClient {
 
     private void ensureChunkIndex(String index) throws Exception {
         if (ensuredChunkIndices.contains(index)) return;
-
-        String checkUrl = osBase + "/" + index;
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create(checkUrl))
-                .method("HEAD", HttpRequest.BodyPublishers.noBody())
-                .timeout(Duration.ofSeconds(5))
-                .build();
-        int status = http.send(req, HttpResponse.BodyHandlers.discarding()).statusCode();
-
-        if (status == 404) {
-            String mapping = buildKnnIndexMapping();
-            put(osBase + "/" + index, mapping);
+        if (!indexExists(index)) {
+            put(osBase + "/" + index, buildKnnIndexMapping());
             log.info("Created k-NN chunk index: {}", index);
         }
         ensuredChunkIndices.add(index);
+    }
+
+    private boolean indexExists(String index) throws Exception {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(osBase + "/" + index))
+                .method("HEAD", HttpRequest.BodyPublishers.noBody())
+                .timeout(Duration.ofSeconds(5))
+                .build();
+        return http.send(req, HttpResponse.BodyHandlers.discarding()).statusCode() == 200;
     }
 
     private String buildKnnIndexMapping() throws Exception {
@@ -112,7 +160,7 @@ public class ChunkIndexClient {
                         "index", Map.of(
                                 "knn", true,
                                 "number_of_shards", "3",
-                                "number_of_replicas", "1"
+                                "number_of_replicas", "0"   // single-node: 0 replicas → green
                         )
                 ),
                 "mappings", Map.of("properties", properties)

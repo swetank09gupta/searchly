@@ -28,15 +28,9 @@
             <groupId>org.springframework.kafka</groupId>
             <artifactId>spring-kafka</artifactId>
         </dependency>
-        <dependency>
-            <groupId>org.opensearch.client</groupId>
-            <artifactId>opensearch-java</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.httpcomponents.core5</groupId>
-            <artifactId>httpcore5</artifactId>
-            <version>5.2.5</version>
-        </dependency>
+        <!-- opensearch-java (ApacheHttpClient5TransportBuilder) removed — its IO reactor
+             threads OOM repeatedly under sustained load. All OpenSearch writes now use
+             Java's built-in HttpClient (HTTP/1.1) via ChunkIndexClient. -->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
