@@ -13,11 +13,12 @@ no ZGC allocation stall, no JVM Keep-Alive-Timer OOM.
 import json
 import logging
 import os
+import signal
 import sys
 import time
 
 import requests
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import Consumer, KafkaError, KafkaException
 
 logging.basicConfig(
     level=logging.INFO,
@@ -232,6 +233,18 @@ def _wait_for_opensearch(retries=30, delay=5.0):
     log.warning("OpenSearch not ready after %d tries — continuing anyway", retries)
 
 
+_shutdown = False
+
+
+def _handle_term(sig, _frame):
+    global _shutdown
+    log.info("Received signal %s — shutting down gracefully", sig)
+    _shutdown = True
+
+
+signal.signal(signal.SIGTERM, _handle_term)
+
+
 def main():
     log.info("Searchly Python indexer starting")
     log.info("  kafka=%s  opensearch=%s  embed=%s", KAFKA_BOOTSTRAP, OS_BASE, EMBED_URL)
@@ -239,14 +252,14 @@ def main():
     _wait_for_opensearch()
 
     consumer = Consumer({
-        "bootstrap.servers":              KAFKA_BOOTSTRAP,
-        "group.id":                       "indexer",
-        "auto.offset.reset":              "earliest",
-        "enable.auto.commit":             True,
-        "auto.commit.interval.ms":        1000,
-        "max.poll.interval.ms":           300_000,
-        "session.timeout.ms":             30_000,
-        "heartbeat.interval.ms":          3_000,
+        "bootstrap.servers":                  KAFKA_BOOTSTRAP,
+        "group.id":                           "indexer",
+        "auto.offset.reset":                  "earliest",
+        "enable.auto.commit":                 True,
+        "auto.commit.interval.ms":            1000,
+        "max.poll.interval.ms":               300_000,
+        "session.timeout.ms":                 30_000,
+        "heartbeat.interval.ms":              3_000,
         "topic.metadata.refresh.interval.ms": 10_000,
     })
 
@@ -255,19 +268,33 @@ def main():
         on_assign=lambda c, ps: log.info(
             "Assigned partitions: %s", [f"{p.topic}[{p.partition}]" for p in ps]
         ),
+        on_revoke=lambda c, ps: log.warning(
+            "Partitions REVOKED: %s", [f"{p.topic}[{p.partition}]" for p in ps]
+        ),
     )
     log.info("Subscribed to indexing.shared + indexing.enterprise.*")
 
     try:
-        while True:
-            msg = consumer.poll(timeout=1.0)
+        while not _shutdown:
+            try:
+                msg = consumer.poll(timeout=1.0)
+            except KafkaException as exc:
+                log.error("consumer.poll() raised KafkaException: %s", exc, exc_info=True)
+                time.sleep(2)
+                continue
+
             if msg is None:
                 continue
             if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
+                err = msg.error()
+                if err.code() == KafkaError._PARTITION_EOF:
                     log.debug("EOF %s[%d] @ %d", msg.topic(), msg.partition(), msg.offset())
                 else:
-                    log.error("Kafka error: %s", msg.error())
+                    fatal = getattr(err, "fatal", lambda: False)()
+                    log.error("Kafka error (fatal=%s): %s", fatal, err)
+                    if fatal:
+                        log.error("Fatal Kafka error — will restart consumer")
+                        break
                 continue
 
             try:
@@ -281,8 +308,14 @@ def main():
                 )
     except KeyboardInterrupt:
         log.info("Interrupted — shutting down")
+    except Exception as exc:
+        log.error("Unhandled consumer loop exception: %s", exc, exc_info=True)
     finally:
-        consumer.close()
+        log.info("Consumer closing...")
+        try:
+            consumer.close()
+        except Exception as exc:
+            log.error("Error during consumer.close(): %s", exc)
         log.info("Consumer closed")
 
 
