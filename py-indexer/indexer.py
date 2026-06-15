@@ -273,17 +273,37 @@ def main():
     )
     log.info("Subscribed to indexing.shared + indexing.enterprise.*")
 
+    def _rss_mb():
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        return int(line.split()[1]) // 1024
+        except Exception:
+            pass
+        return -1
+
     try:
         while not _shutdown:
             # poll() returns a dict of {TopicPartition: [ConsumerRecord]}
             records = consumer.poll(timeout_ms=1000)
             if not records:
                 continue
+            total_msgs = sum(len(v) for v in records.values())
+            rss_before_poll = _rss_mb()
+            log.info("poll() returned %d messages across %d partitions | RSS=%dMiB",
+                     total_msgs, len(records), rss_before_poll)
             for tp, messages in records.items():
                 for msg in messages:
                     try:
+                        rss_pre = _rss_mb()
                         event = json.loads(msg.value.decode("utf-8"))
                         process(event)
+                        rss_post = _rss_mb()
+                        delta = rss_post - rss_pre
+                        if delta > 50:
+                            log.warning("RSS grew %dMiB during process() of offset %d (doc=%s)",
+                                        delta, msg.offset, event.get("docId", "?"))
                     except Exception as exc:
                         log.error(
                             "Failed processing %s[%d]@%d: %s",
