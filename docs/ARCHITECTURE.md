@@ -283,7 +283,58 @@ Response 200:
 
 ---
 
-## 9. Tenant Tiers
+## 9. Intelligence Layer (built on top of the search platform)
+
+The search platform powers an organisation intelligence agent that answers natural-language
+questions from your engineering knowledge base. Full design: [INTELLIGENCE_ARCHITECTURE.md](INTELLIGENCE_ARCHITECTURE.md).
+
+### RAG pipeline (post P0–P3)
+
+```
+User query
+  → metadata extraction (regex: env, service) — ~0ms
+  → cache check (Redis) — ~1ms
+  → query rewrite (Ollama llama3.2:3b) — ~600ms
+  → embed ×2 (BAAI/bge-small-en-v1.5, 384-dim, query prefix) — ~25ms each
+  → 6 retrieval legs (currently sequential, target: CompletableFuture.allOf()):
+      knnOrig×1.0, knnRew×0.7, bm25Orig×1.0, bm25Rew×0.7
+      custKnn×2.0, custBm25×2.0 (customer= context only)
+      each: top-50, with env/service term filters
+  → RRF merge: score = Σ (listWeight × authorityWeight) / (60 + rank)
+      authority: live_logs=1.0 → deployment=0.9 → code=0.8 → jira=0.7 → confluence=0.5
+  → top-30 → cross-encoder rerank (BAAI/bge-reranker-base) — ~300ms
+  → source budget: warehouse_logs=2, deployment/jira/code/confluence=1 each
+  → top-6 → Ollama generate (llama3.2:3b) — ~4s
+  → SearchResponse + retrievalTraces[30] (see ADR 0023)
+```
+
+### Knowledge Graph (P3.1 — storage only, extraction not yet wired)
+
+Two Postgres tables (`kg_entities`, `kg_relationships`, V4 migration) with JSONB properties.
+BFS traversal via recursive CTE (max depth 5). REST API at `/api/v1/kg`.
+
+**The graph is empty** — `connectors/sync.py` was not updated. Wiring plan (ordered by ROI):
+1. Jira remote links → `jira_issue --[fixed_by]--> pull_request` (Sprint 2.2)
+2. GitHub PR/commits API → `pull_request --[contains]--> commit` (Sprint 2.3)
+3. File path heuristics → `commit --[touches]--> service`
+4. k8s label `app=<service>` → `deployment --[runs]--> service`
+
+### Retrieval Tracing (P3.2)
+
+Every `SearchResponse` carries a `retrievalTraces` list. Each trace records knnRank, bm25Rank,
+rrfScore, rrfRank, rerankerScore, finalRank, included, embeddingVersion for one RRF candidate.
+Enables per-stage regression root-cause without re-running queries in a debugger.
+
+### Continuous Evaluation (P3.4)
+
+`eval_scheduler.py` runs nightly at 02:00 UTC (APScheduler). Writes results to
+`eval_history/YYYY-MM-DD_HH-MM.json`. Detects >10% regression in avg_answer_score,
+source_recall, retrieval_recall@20, keyword_hit_rate, pass_rate. Eval dataset is 5 sample
+questions today — target 200+ production-derived cases.
+
+---
+
+## 10. Tenant Tiers
 
 | Tier | QPS | Index Plan | Kafka | Quota |
 |---|---|---|---|---|

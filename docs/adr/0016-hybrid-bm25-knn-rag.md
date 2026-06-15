@@ -1,7 +1,8 @@
 # ADR 0016: Hybrid BM25 + kNN Search for RAG Retrieval
 
-**Status:** Accepted
+**Status:** Superseded by [ADR 0021](0021-bge-embeddings-cross-encoder-reranking.md)
 **Date:** 2026-06-14
+**Superseded:** 2026-06-16
 **Layer:** Intelligence Agent + Search API
 
 ## Context
@@ -58,7 +59,7 @@ user_query
 
 **Neutral**
 - RRF weights (BM25 vs kNN) can be tuned if retrieval quality drifts.
-- Cross-encoder reranking is a natural next step if precision needs improving — deferred.
+- Cross-encoder reranking is a natural next step if precision needs improving — **implemented in ADR 0021**.
 
 ## Alternatives Considered
 
@@ -66,5 +67,5 @@ user_query
 |---|---|
 | BM25 only | Misses intent queries; poor on paraphrased concepts |
 | kNN only | Misses exact identifier matches (ticket IDs, error codes, function names) |
-| Cross-encoder reranking | Requires separate model; 50–200ms additional latency per candidate; deferred |
+| Cross-encoder reranking | Deferred at ADR-0016 time; **implemented in ADR 0021** (`BAAI/bge-reranker-base`) |
 | Larger embedding model (`all-mpnet-base-v2`, 768 dim) | Marginal quality gain at 2× memory; not justified yet |

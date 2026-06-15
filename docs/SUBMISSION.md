@@ -4,7 +4,7 @@
 **Author:** Swetank Gupta
 **Repository:** https://github.com/swetankgupta/searchly
 **License:** Apache 2.0
-**Date:** 2026-06-03
+**Date:** 2026-06-16
 
 ## Table of Contents
 
@@ -13,7 +13,7 @@
 3. [Engineering Experience Showcase](#3-engineering-experience-showcase) — from `docs/EXPERIENCE.md`
 
 **Also in this repository (referenced but not embedded):**
-- [14 Architecture Decision Records](adr/README.md) — one per significant decision
+- [23 Architecture Decision Records](adr/README.md) — one per significant decision (ADR 0021–0023 cover retrieval quality + observability improvements)
 - [Decisions & Assumptions summary](DECISIONS.md)
 - [Benchmarks](BENCHMARKS.md) — laptop-scale performance numbers
 - Source code in `gateway/`, `search-api/`, `indexer/`, `common/`

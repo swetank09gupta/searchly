@@ -56,7 +56,7 @@ What it would take to evolve the Searchly prototype into a service that can be o
 - M2M via OAuth2 client_credentials or scoped API keys (Argon2-hashed at rest).
 - RBAC (`TENANT_ADMIN/EDITOR/VIEWER/SERVICE`) enforced with `@PreAuthorize`.
 - `TenantSecurityFilter` rejects cross-tenant requests; alert on any occurrence.
-- Document-level ACL fields in OpenSearch (`acl_users`, `acl_roles`) for fine-grained sharing.
+- Document-level ACL fields in OpenSearch (`acl_users`, `acl_roles`) for fine-grained sharing — **fields exist but are not yet enforced at query time; this is a known gap (Sprint 2.1)**.
 
 **Data**
 - Encryption at rest: KMS-managed keys; Postgres TDE, OpenSearch node-to-node + disk, S3 SSE-KMS, Redis TLS+AUTH.
@@ -152,7 +152,26 @@ What it would take to evolve the Searchly prototype into a service that can be o
 
 ---
 
-## 8. Cost Optimization (bonus)
+## 8. Known Architectural Gaps (post P0–P3 review)
+
+These are architectural weaknesses that are understood and scheduled, ordered by severity.
+
+| # | Gap | Severity | Sprint | Notes |
+|---|---|---|---|---|
+| 1 | `acl_users`/`acl_roles` stored in OpenSearch but never enforced at query time | **Critical** | 2.1 | Any authenticated user within a tenant sees all documents regardless of intended sharing |
+| 2 | Knowledge graph extraction not wired — graph is empty | High | 2.2–2.3 | KG tables + API exist; `connectors/sync.py` never updated; start with Jira remote links (authoritative) |
+| 3 | 6 retrieval legs run as sequential HTTP calls | High | 1.1 | ~300ms recoverable; fix: `CompletableFuture.allOf()` in `RagService.answer()` |
+| 4 | Recency boost missing from chunk BM25 | Medium | 1.2 | `SearchService` applies Gauss decay to `documents-*` BM25; `RagService.bm25Internal()` uses plain `match` |
+| 5 | Sessions in-memory — blocks horizontal scaling of warehouse-agent | Medium | 1.3 | `SessionStore` is a dict; swap to Redis hashes + TTL (~30-line change) |
+| 6 | No embedding version migration path | Medium | Backlog | Model upgrades require full re-embed; need versioned index aliases strategy |
+| 7 | No production query log → eval feedback loop | Medium | 4.1 | Eval dataset has 5 questions; no loop from real user queries |
+| 8 | `Kafka max.poll.records` unbounded | Medium | 3.2 | Default 500; a burst of large documents can OOM the indexer; set to 10 + semaphore |
+| 9 | Redis failure fails closed (429 all requests) | Low | 3.3 | Rate limiter has no degradation path; catch `RedisException`, allow through |
+| 10 | Ollama is synchronous, no partial degradation | Low | Backlog | No async queue; tail latency (120s timeout) blocks the request thread |
+
+---
+
+## 9. Cost Optimization (bonus)
 
 - Tiered OpenSearch storage (hot SSD → warm HDD → cold S3-backed snapshot).
 - Spot/preemptible nodes for indexer (idempotent, restartable).

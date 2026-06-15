@@ -82,3 +82,24 @@ GET-by-id outperforms search because it skips OpenSearch entirely (served from P
 5. **Failure injection.** Kill one OpenSearch data node, observe cache fallback and recovery time.
 
 That's the production-readiness path; the numbers above are the "is the design defensible on day one" answer.
+
+---
+
+## Intelligence Agent — Latency Profile
+
+These are **analytical estimates**, not `ab` numbers. The RAG pipeline on a CPU-only host:
+
+| Stage | p50 | p99 | Notes |
+|---|---|---|---|
+| Cache hit (Redis) | 1 ms | 3 ms | Conversational queries bypass cache |
+| Query rewrite (Ollama) | 600 ms | 1800 ms | llama3.2:3b; dominant contributor |
+| Embed ×2 (BGE) | 50 ms | 160 ms | Two embeds for dual-query |
+| 6 retrieval legs (sequential today) | 300 ms | 800 ms | Fix: `CompletableFuture.allOf()` → ~60ms |
+| Cross-encoder rerank (30 pairs) | 300 ms | 800 ms | bge-reranker-base, CPU |
+| Ollama generate | 4000 ms | 12000 ms | llama3.2:3b, CPU |
+| **Total (knowledge-only, no agent)** | **~5 s** | **~15 s** | Cache miss, no live tools |
+| **Total (warehouse agent + live logs)** | **~30 s** | **~120 s** | SSH bastion + ES query adds 2–4s/tool call |
+
+The 120s Ollama timeout is the hard ceiling for warehouse agent queries with multiple tool rounds.
+At 100 concurrent users, Ollama saturates at ~3 in-flight requests on a 4-core CPU. Production
+scale requires a GPU node (`A10G` is sufficient) or an async LLM queue.

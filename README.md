@@ -67,12 +67,15 @@ Browser / curl
     │
     ▼
 Intelligence Agent (FastAPI :8084)
-    ├── RAG: embed → BM25+kNN (OpenSearch :9200) → LLM (Ollama :11434)
-    └── Live: SSH bastion → kubectl exec → Elasticsearch query
-                    ↑ ES password fetched from k8s Secret at runtime, never stored
+    ├── RAG: query rewrite → embed (BGE) → 6-leg BM25+kNN → RRF → reranker → LLM
+    │         ↑ BAAI/bge-small-en-v1.5 (384-dim, asymmetric query prefix)
+    │         ↑ BAAI/bge-reranker-base (cross-encoder, top-30 → top-6)
+    ├── Live: SSH bastion → kubectl exec → Elasticsearch query
+    │         ↑ ES password fetched from k8s Secret at runtime, never stored
+    └── Knowledge Graph (Postgres) — Jira↔PR↔commit↔service relationships
 
 Sync Cron (every 4h):
-    Jira projects       → OpenSearch
+    Jira projects       → OpenSearch  [+ kg_entities / kg_relationships via remote links]
     Confluence spaces   → OpenSearch  [recursive child pages]
     GitHub repos        → OpenSearch  [SHA-incremental, only changed repos]
     ADRs / design docs  → OpenSearch  [kept whole, not split]
@@ -118,10 +121,10 @@ docker compose -f deploy/docker-compose.yml run --rm connectors python sync.py -
 |---|---|
 | **[Intelligence Architecture](docs/INTELLIGENCE_ARCHITECTURE.md)** | Full system design: RAG pipeline, ES log access, sync cron, customer registry |
 | **[Setup Guide](docs/SETUP_INTELLIGENCE.md)** | Prerequisites, start/stop, verification, adding customers, troubleshooting |
-| [ADRs 0015–0020](docs/adr/README.md#intelligence-layer-adrs-0015-0020) | Architecture Decision Records for the intelligence layer |
+| [ADRs 0015–0023](docs/adr/README.md) | Architecture Decision Records (platform + intelligence + retrieval quality) |
 | [Search Platform Architecture](docs/ARCHITECTURE.md) | Underlying platform: BM25+kNN, OpenSearch, Kafka indexing, multi-tenancy |
-| [Platform ADRs 0001–0014](docs/adr/README.md) | Platform-level ADRs (language, search engine, queue, auth, etc.) |
-| [Production Readiness](docs/PRODUCTION_READINESS.md) | Scalability, resilience, security, observability |
+| [Production Readiness](docs/PRODUCTION_READINESS.md) | Scalability, resilience, security, observability, known gaps |
+| [Decisions & Trade-offs](docs/DECISIONS.md) | Key decisions and assumptions summary |
 | [Benchmarks](docs/BENCHMARKS.md) | Benchmark numbers and caveats |
 
 ---
