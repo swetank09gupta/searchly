@@ -2,6 +2,9 @@ server:
   port: 8081
 
 spring:
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
   application:
     name: search-api
   datasource:
