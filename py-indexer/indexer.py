@@ -174,8 +174,7 @@ def process(event):
     title      = event.get("title") or ""
     content    = event.get("content") or ""
     metadata   = event.get("metadata") or {}
-    created_ts = event.get("createdAt")
-    created_at = str(created_ts) if created_ts is not None else ""
+    created_at = event.get("createdAt")  # int epoch-ms or None; never coerce to str
 
     doc_idx   = _doc_index(tier, tenant_id)
     chunk_idx = _chunk_index(tier, tenant_id)
