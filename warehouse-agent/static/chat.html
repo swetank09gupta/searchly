@@ -331,10 +331,8 @@ async function sendMessage() {
   const s = currentSession();
   if (!s) return;
 
-  // Hide welcome screen
   document.getElementById('welcome').classList.add('hidden');
 
-  // Optimistically add user message
   const userMsg = { role: 'user', content: text, ts: Date.now() };
   s.messages.push(userMsg);
   if (s.title === 'New conversation') {
@@ -348,81 +346,152 @@ async function sendMessage() {
   scrollToBottom();
   renderSessionList();
 
-  // Typing indicator
   state.loading = true;
   setInputEnabled(false);
-  const typingEl = addTypingIndicator();
+
+  // Create streaming bubble (status line + empty content area)
+  const { row, statusRowEl, statusTextEl, contentEl, bubbleEl } = addStreamingBubble();
 
   try {
     const headers = { 'Content-Type': 'application/json' };
     if (state.apiKey) headers['X-API-Key'] = state.apiKey;
 
-    const body = {
-      message:    text,
-      session_id: s.serverSessionId || null,
-    };
-
-    const resp = await fetch(`${API_BASE}/api/v1/chat`, {
+    const resp = await fetch(`${API_BASE}/api/v1/chat/stream`, {
       method:  'POST',
       headers,
-      body:    JSON.stringify(body),
+      body:    JSON.stringify({ message: text, session_id: s.serverSessionId || null }),
     });
 
-    typingEl.remove();
-
     if (resp.status === 401) {
+      row.remove();
       addErrorMessage('Invalid API key. Please update it in the sidebar.');
       if (state.authEnabled) showKeyModal();
       return;
     }
-    if (resp.status === 403) {
-      addErrorMessage('You don\'t have access to that customer\'s data.');
-      return;
-    }
     if (!resp.ok) {
+      row.remove();
       const err = await resp.json().catch(() => ({ detail: resp.statusText }));
       addErrorMessage(`Error ${resp.status}: ${err.detail || resp.statusText}`);
       return;
     }
 
-    const data = await resp.json();
+    // Read SSE stream
+    const reader  = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', tokenBuf = '', doneData = null, firstToken = true;
 
-    // Persist server session ID for multi-turn
-    s.serverSessionId = data.session_id;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    // Store context on session
-    if (data.resolved_customer) {
-      s.context = {
-        customer:   data.resolved_customer,
-        env:        data.resolved_env,
-        stage:      data.lifecycle_stage,
-        stageLabel: data.lifecycle_label,
-        hasLiveData: data.has_live_data,
-      };
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const ev = JSON.parse(line.slice(6));
+
+          if (ev.type === 'status') {
+            statusTextEl.textContent = ev.message;
+
+          } else if (ev.type === 'token') {
+            if (firstToken) {
+              statusRowEl.classList.add('hidden');  // hide dots + status text
+              firstToken = false;
+            }
+            tokenBuf += ev.content;
+            // Stream as plain text; final markdown render happens on 'done'
+            contentEl.textContent = tokenBuf;
+            scrollToBottom();
+
+          } else if (ev.type === 'done') {
+            doneData = ev;
+
+          } else if (ev.type === 'error') {
+            row.remove();
+            addErrorMessage(ev.message || 'Server error');
+            return;
+          }
+        } catch {}
+      }
     }
 
-    const agentMsg = {
+    if (!doneData) return;
+
+    // Final render: replace plain text with markdown
+    const finalAnswer = doneData.answer || tokenBuf;
+    statusRowEl.classList.add('hidden');
+    contentEl.className = 'md-body';
+    contentEl.innerHTML = renderMd(finalAnswer);
+
+    // Tools badge
+    if (doneData.tools_called && doneData.tools_called.length) {
+      const toolNames = doneData.tools_called
+        .map(t => `<code class="text-slate-500 text-xs">${escHtml(t)}</code>`).join(' · ');
+      const det = document.createElement('details');
+      det.className = 'mt-2 text-xs';
+      det.innerHTML = `
+        <summary class="text-slate-400 hover:text-slate-600 cursor-pointer select-none">
+          🔧 Tools used (${doneData.tools_called.length})
+        </summary>
+        <div class="mt-1 pl-2">${toolNames}</div>`;
+      bubbleEl.appendChild(det);
+    }
+
+    // Live badge
+    if (doneData.has_live_data) {
+      const lb = document.createElement('span');
+      lb.className = 'inline-flex items-center gap-1 text-xs text-green-600 font-medium ml-2';
+      lb.innerHTML = '<span class="w-1.5 h-1.5 bg-green-500 rounded-full inline-block"></span>Live data';
+      contentEl.appendChild(lb);
+    }
+
+    // Clarification styling
+    if (doneData.needs_clarification) {
+      row.querySelector('.avatar-el').className =
+        'avatar-el w-8 h-8 bg-amber-100 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5 text-base';
+      row.querySelector('.avatar-el').textContent = '❓';
+      bubbleEl.classList.remove('bg-white', 'border-slate-200');
+      bubbleEl.classList.add('bg-amber-50', 'border-amber-200');
+      const clarLabel = document.createElement('div');
+      clarLabel.className = 'text-xs font-medium text-amber-600 mb-1';
+      clarLabel.textContent = 'Needs clarification';
+      row.querySelector('.bubble-wrapper').prepend(clarLabel);
+    }
+
+    // Persist to session
+    s.serverSessionId = doneData.session_id;
+    if (doneData.resolved_customer) {
+      s.context = {
+        customer:    doneData.resolved_customer,
+        env:         doneData.resolved_env,
+        stage:       doneData.lifecycle_stage,
+        stageLabel:  doneData.lifecycle_label,
+        hasLiveData: doneData.has_live_data,
+      };
+    }
+    s.messages.push({
       role:             'agent',
-      content:          data.answer,
-      clarification:    data.needs_clarification,
-      toolsCalled:      data.tools_called || [],
-      isOperational:    data.is_operational,
-      hasLiveData:      data.has_live_data,
-      resolvedCustomer: data.resolved_customer,
-      resolvedEnv:      data.resolved_env,
-      stage:            data.lifecycle_stage,
+      content:          finalAnswer,
+      clarification:    doneData.needs_clarification,
+      toolsCalled:      doneData.tools_called || [],
+      isOperational:    doneData.is_operational,
+      hasLiveData:      doneData.has_live_data,
+      resolvedCustomer: doneData.resolved_customer,
+      resolvedEnv:      doneData.resolved_env,
+      stage:            doneData.lifecycle_stage,
       ts:               Date.now(),
-    };
-    s.messages.push(agentMsg);
+    });
     s.updatedAt = Date.now();
     saveSessions();
-    renderMessages(s.messages);
     updateContextBadges(s.context);
-    scrollToBottom();
     renderSessionList();
+    scrollToBottom();
 
   } catch (err) {
-    typingEl.remove();
+    row.remove();
     addErrorMessage('Could not reach the server. Is it running?');
     console.error(err);
   } finally {
@@ -430,6 +499,37 @@ async function sendMessage() {
     setInputEnabled(true);
     document.getElementById('input').focus();
   }
+}
+
+function addStreamingBubble() {
+  const container = document.getElementById('messages');
+  const row = document.createElement('div');
+  row.className = 'msg-row flex gap-3 max-w-3xl mx-auto mb-4';
+  row.innerHTML = `
+    <div class="avatar-el w-8 h-8 bg-slate-100 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+      <svg class="w-4 h-4 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.347.35A3.001 3.001 0 0112 21a3 3 0 01-2.12-.88l-.346-.349z"/>
+      </svg>
+    </div>
+    <div class="bubble-wrapper flex-1 min-w-0">
+      <div class="bg-white border border-slate-200 shadow-sm text-sm text-slate-800 px-4 py-3 rounded-2xl rounded-tl-md">
+        <div class="status-row flex items-center gap-2 text-xs text-slate-400 mb-1">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="status-text ml-1">Thinking…</span>
+        </div>
+        <div class="content-area text-slate-700 text-sm whitespace-pre-wrap"></div>
+      </div>
+    </div>`;
+  container.appendChild(row);
+  scrollToBottom();
+  return {
+    row,
+    bubbleEl:    row.querySelector('.bg-white'),
+    statusRowEl: row.querySelector('.status-row'),
+    statusTextEl: row.querySelector('.status-text'),
+    contentEl:   row.querySelector('.content-area'),
+  };
 }
 
 // ─── Render messages ──────────────────────────────────────────────────────────

@@ -37,7 +37,9 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Path, Request
-from fastapi.responses import HTMLResponse
+import json as _json
+
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent import run_agent
@@ -342,6 +344,58 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> ChatResponse:
         result["needs_clarification"] = False
 
     return ChatResponse(**{k: result.get(k) for k in ChatResponse.model_fields})
+
+
+@app.post("/api/v1/chat/stream")
+async def chat_stream_endpoint(req: ChatRequest, request: Request):
+    """
+    Streaming version of /api/v1/chat.  Returns text/event-stream SSE:
+      data: {"type":"status","message":"Searching knowledge base..."}
+      data: {"type":"token","content":"Based "}
+      data: {"type":"done","session_id":"...","answer":"...",...}
+    """
+    if not req.message or not req.message.strip():
+        raise HTTPException(status_code=400, detail="message is required")
+
+    key_record = _require_key(request)
+
+    async def event_generator():
+        try:
+            async for event in chat.handle_stream(
+                message       = req.message.strip(),
+                session_id    = req.session_id,
+                customer_hint = req.customer,
+                env_hint      = req.env,
+                product_hint  = req.product,
+            ):
+                if event.get("type") == "done":
+                    resolved_customer = event.get("resolved_customer")
+                    if resolved_customer and not auth_db.is_customer_allowed(key_record, resolved_customer):
+                        log.warning("Tenant isolation: key %r denied customer %r",
+                                    key_record.get("name"), resolved_customer)
+                        event = {
+                            **event,
+                            "answer": (
+                                "I'm sorry — your current credentials don't have access to "
+                                f"**{resolved_customer}**'s data.\n\n"
+                                "Please contact your GreyOrange administrator to request access."
+                            ),
+                            "resolved_customer": None,
+                            "resolved_env":      None,
+                            "lifecycle_stage":   None,
+                            "lifecycle_label":   None,
+                            "has_live_data":     False,
+                        }
+                yield f"data: {_json.dumps(event)}\n\n"
+        except Exception as e:
+            log.exception("Stream handler failed")
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ─── Customer management (ops / admin use) ────────────────────────────────────

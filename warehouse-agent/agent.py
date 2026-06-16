@@ -321,6 +321,163 @@ def _find_env_name(customer_record: dict | None, env_config: dict | None) -> str
     return None
 
 
+def _tool_status_message(fn_name: str, fn_args: dict) -> str:
+    if fn_name == "search_knowledge":
+        q = fn_args.get("query", "")
+        return f"Searching knowledge base{': ' + q[:50] + '…' if q else ''}…"
+    if fn_name == "get_logs":
+        svc = fn_args.get("service", "")
+        return f"Fetching logs{' for ' + svc if svc else ''}…"
+    if fn_name == "get_pod_status":
+        return "Checking pod status…"
+    if fn_name == "get_deployment_state":
+        return "Reading deployment state…"
+    if fn_name == "list_log_indices":
+        return "Listing log indices…"
+    return f"Running {fn_name}…"
+
+
+async def _generate_stream(url: str, model: str, messages: list[dict]):
+    """Yield content tokens from Ollama streaming /api/chat."""
+    body: dict[str, Any] = {"model": model, "messages": messages, "stream": True}
+    try:
+        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+            async with client.stream("POST", f"{url}/api/chat", json=body) as resp:
+                async for line in resp.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                        content = chunk.get("message", {}).get("content", "")
+                        if content:
+                            yield content
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+    except Exception as e:
+        log.warning("Ollama stream error: %s", e)
+
+
+async def run_agent_stream(
+    question:        str,
+    customer_id:     str | None,
+    customer_record: dict | None,
+    env_config:      dict | None,
+    product:         str | None,
+    ollama_url:      str,
+    ollama_model:    str,
+    searchly_url:    str,
+    searchly_tenant: str,
+):
+    """
+    Streaming version of run_agent.  Yields dicts:
+      {"type": "status",  "message": "..."}         — pipeline progress for the UI
+      {"type": "token",   "content": "..."}          — synthesis tokens
+      {"type": "done", "answer": "...", ...}          — final metadata
+    """
+    stage       = (customer_record or {}).get("lifecycle_stage", "solution")
+    has_cluster = bool(env_config and
+                       (env_config.get("k8s_bastion") or env_config.get("k8s_context")))
+    operational = _is_operational(question) and has_cluster
+
+    tools_customer: dict | None = None
+    if has_cluster and customer_record:
+        tools_customer = {
+            "id":            customer_id,
+            "k8s_bastion":   env_config.get("k8s_bastion", ""),
+            "k8s_context":   env_config.get("k8s_context", ""),
+            "k8s_namespace": env_config.get("k8s_namespace", "default"),
+            "pod_map":       env_config.get("pod_map", {}),
+        }
+
+    env_name   = _find_env_name(customer_record, env_config)
+    sys_prompt = _system_prompt(customer_record, env_config, env_name, product)
+    messages: list[dict] = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user",   "content": question},
+    ]
+    tools_called: list[str] = []
+    tool_results: dict[str, Any] = {}
+
+    _RUNTIME = {
+        "customer_obj":    tools_customer,
+        "searchly_url":    searchly_url,
+        "searchly_tenant": searchly_tenant,
+    }
+
+    # Phase 1: Planning
+    if not operational:
+        tool_calls_to_run = [{"function": {"name": "search_knowledge",
+                                           "arguments": {"query": question}}}]
+    else:
+        yield {"type": "status", "message": "Planning investigation…"}
+        tool_calls_to_run = await _plan_tools(
+            ollama_url, ollama_model, messages, tools_customer, customer_id,
+            searchly_url, searchly_tenant, knowledge_only=False,
+        )
+
+    # Phase 2: Execution
+    for tc in tool_calls_to_run:
+        fn_name = tc.get("function", {}).get("name", "")
+        fn_args = tc.get("function", {}).get("arguments", {})
+        if isinstance(fn_args, str):
+            try:
+                fn_args = json.loads(fn_args)
+            except json.JSONDecodeError:
+                fn_args = {}
+
+        yield {"type": "status", "message": _tool_status_message(fn_name, fn_args)}
+
+        fn = TOOL_REGISTRY.get(fn_name)
+        if fn is None:
+            result = {"error": f"Unknown tool: {fn_name}"}
+        else:
+            if fn_name in ("get_logs", "get_deployment_state",
+                           "get_pod_status", "list_log_indices"):
+                fn_args["customer_obj"] = _RUNTIME["customer_obj"]
+                fn_args.pop("customer_id", None)
+            elif fn_name == "search_knowledge":
+                fn_args.setdefault("searchly_url",    _RUNTIME["searchly_url"])
+                fn_args.setdefault("tenant",          _RUNTIME["searchly_tenant"])
+                fn_args.setdefault("customer_id",     customer_id)
+            try:
+                result = await fn(**fn_args)
+            except Exception as e:
+                log.warning("Tool %s failed: %s", fn_name, e)
+                result = {"error": str(e)}
+
+        tools_called.append(fn_name)
+        tool_results[fn_name] = result
+        messages.append({
+            "role":    "tool",
+            "content": json.dumps(result, default=str)[:8000],
+        })
+
+    # Phase 3: Streaming synthesis
+    yield {"type": "status", "message": "Generating answer…"}
+    messages.append({
+        "role":    "user",
+        "content": "Based on all the data gathered above, give your final answer.",
+    })
+
+    full_answer = ""
+    async for token in _generate_stream(ollama_url, ollama_model, messages):
+        full_answer += token
+        yield {"type": "token", "content": token}
+
+    if not full_answer:
+        full_answer = _no_answer(stage, question)
+        yield {"type": "token", "content": full_answer}
+
+    yield {
+        "type":           "done",
+        "answer":         full_answer,
+        "tools_called":   list(dict.fromkeys(tools_called)),
+        "tool_results":   tool_results,
+        "is_operational": operational,
+        "env_used":       env_name,
+    }
+
+
 def _no_answer(stage: str, question: str) -> str:
     if stage == "solution":
         return (

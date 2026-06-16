@@ -42,7 +42,7 @@ from typing import Any
 
 import httpx
 
-from agent import run_agent, _is_operational
+from agent import run_agent, run_agent_stream, _is_operational
 from customer_registry import CustomerRegistry, LIFECYCLE_ORDER, lifecycle_label
 from entity_extractor import extract_entities
 from products_config import product_menu, parse_selection, validate_products, ids as product_ids
@@ -235,6 +235,191 @@ class ChatHandler:
             "tool_results":       agent_result["tool_results"],
             "is_operational":     agent_result["is_operational"],
         }
+
+    # ─── Streaming handle ─────────────────────────────────────────────────────
+
+    async def handle_stream(
+        self,
+        message:       str,
+        session_id:    str | None,
+        customer_hint: str | None = None,
+        env_hint:      str | None = None,
+        product_hint:  str | None = None,
+    ):
+        """
+        Streaming version of handle().  Yields SSE event dicts:
+          {"type": "status",  "message": "..."}
+          {"type": "token",   "content": "..."}
+          {"type": "done",    session_id, answer, resolved_customer, ...}
+        """
+        session = self.sessions.get_or_create(session_id)
+        session.add_turn("user", message)
+
+        # Step 1: Pending clarification from previous turn
+        if session.pending:
+            result = await self._handle_clarification(message, session)
+            if result:
+                yield {"type": "done", **result}
+                return
+
+        # Step 2: Extract entities
+        yield {"type": "status", "message": "Extracting entities…"}
+        entities = await extract_entities(message, self.ollama_url, self.ollama_model)
+
+        c_hint = customer_hint or entities.get("customer_hint")
+        e_hint = env_hint      or entities.get("env_hint")
+        p_hint = product_hint  or entities.get("product_hint")
+
+        if not c_hint and session.resolved_customer_id:
+            c_hint = session.resolved_customer_id
+        if not e_hint and session.resolved_env:
+            e_hint = session.resolved_env
+
+        # Step 3: Resolve customer
+        yield {"type": "status", "message": "Resolving customer…"}
+        resolution = self.resolver.resolve(c_hint, e_hint, question=message)
+
+        if resolution.needs_input:
+            # General knowledge shortcut — no customer hint, no live-data signals
+            if not c_hint and not _is_operational(message):
+                async for event in run_agent_stream(
+                    question        = message,
+                    customer_id     = None,
+                    customer_record = None,
+                    env_config      = None,
+                    product         = p_hint,
+                    ollama_url      = self.ollama_url,
+                    ollama_model    = self.ollama_model,
+                    searchly_url    = self.searchly_url,
+                    searchly_tenant = self.searchly_tenant,
+                ):
+                    if event["type"] == "done":
+                        session.add_turn("agent", event["answer"])
+                        yield {
+                            **event,
+                            "session_id":          session.id,
+                            "resolved_customer":   None,
+                            "resolved_env":        None,
+                            "lifecycle_stage":     None,
+                            "lifecycle_label":     None,
+                            "has_live_data":       False,
+                            "needs_clarification": False,
+                        }
+                    else:
+                        yield event
+                return
+
+            # Must ask for clarification
+            pending_kind = "new_customer_products" if not resolution.candidates else "customer_match"
+            session.set_pending(
+                kind     = pending_kind,
+                question = resolution.message,
+                options  = [c[0] for c in resolution.candidates],
+                context  = {
+                    "original_question": message,
+                    "customer_hint":     c_hint,
+                    "env_hint":          e_hint,
+                    "product_hint":      p_hint,
+                    "entities":          entities,
+                },
+            )
+            session.add_turn("agent", resolution.message)
+            yield {
+                "type":                "done",
+                "session_id":          session.id,
+                "answer":              resolution.message,
+                "resolved_customer":   session.resolved_customer_id,
+                "resolved_env":        session.resolved_env,
+                "lifecycle_stage":     None,
+                "lifecycle_label":     None,
+                "has_live_data":       False,
+                "needs_clarification": True,
+                "tools_called":        [],
+                "tool_results":        {},
+                "is_operational":      False,
+            }
+            return
+
+        # Step 4: Resolve env config
+        customer_record, env_config, env_name = self._resolve_env_config(
+            resolution.customer_id, e_hint or resolution.env
+        )
+
+        if e_hint and not env_config and e_hint in LIFECYCLE_ORDER[1:]:
+            ask = (
+                f"**{customer_record.get('name', 'This customer')}** doesn't have a **{e_hint}** "
+                f"environment configured yet. "
+                f"I can answer from knowledge for now, or you can share the "
+                f"cluster details and I'll set it up:\n\n"
+                f"  • **k8s_bastion** (SSH jump host, e.g. `user@192.168.x.x`)\n"
+                f"  • **k8s_context** (kubectl context name)\n"
+                f"  • **k8s_namespace** (default: `default`)\n\n"
+                f"Share the details, or say 'skip' to get a knowledge-only answer."
+            )
+            session.set_pending(
+                kind     = "new_env_details",
+                question = ask,
+                context  = {
+                    "original_question": message,
+                    "customer_id":       resolution.customer_id,
+                    "env":               e_hint,
+                    "customer_record":   customer_record,
+                },
+            )
+            session.add_turn("agent", ask)
+            yield {
+                "type":                "done",
+                "session_id":          session.id,
+                "answer":              ask,
+                "resolved_customer":   session.resolved_customer_id,
+                "resolved_env":        session.resolved_env,
+                "lifecycle_stage":     None,
+                "lifecycle_label":     None,
+                "has_live_data":       False,
+                "needs_clarification": True,
+                "tools_called":        [],
+                "tool_results":        {},
+                "is_operational":      False,
+            }
+            return
+
+        # Step 5: Persist resolution
+        session.resolved_customer_id = resolution.customer_id
+        session.resolved_env         = env_name
+        session.clear_pending()
+
+        confirm_note = f"\n\n*({resolution.message})*" if resolution.needs_confirm else ""
+
+        # Step 6: Stream the agent
+        async for event in run_agent_stream(
+            question        = message,
+            customer_id     = resolution.customer_id,
+            customer_record = customer_record,
+            env_config      = env_config,
+            product         = p_hint,
+            ollama_url      = self.ollama_url,
+            ollama_model    = self.ollama_model,
+            searchly_url    = self.searchly_url,
+            searchly_tenant = self.searchly_tenant,
+        ):
+            if event["type"] == "done":
+                full_answer = event["answer"] + confirm_note
+                session.add_turn("agent", full_answer)
+                if session.needs_compression():
+                    await self._compress_session_history(session)
+                yield {
+                    **event,
+                    "answer":              full_answer,
+                    "session_id":          session.id,
+                    "resolved_customer":   resolution.customer_id,
+                    "resolved_env":        env_name,
+                    "lifecycle_stage":     customer_record.get("lifecycle_stage"),
+                    "lifecycle_label":     lifecycle_label(customer_record.get("lifecycle_stage", "solution")),
+                    "has_live_data":       bool(env_config) and bool(event.get("tools_called")),
+                    "needs_clarification": False,
+                }
+            else:
+                yield event
 
     # ─── Clarification response handler ──────────────────────────────────────
 
