@@ -44,7 +44,7 @@ JSON:"""
 
 # Regex fallback — catches the most common patterns without LLM
 _CUSTOMER_HINTS = re.compile(
-    r"(?:for|at|in|our|the|customer|client|site|warehouse)\s+"
+    r"\b(?:for|at|in|our|the|customer|client|site|warehouse)\s+"
     r"([A-Za-z0-9][A-Za-z0-9\s\-'\.]{2,40}?)(?:\s+(?:prod|staging|dev|test|env|cluster|site|dc)|\s*[?,\.]|$)",
     re.IGNORECASE,
 )
@@ -62,12 +62,19 @@ _ENV_MAP = {
     "development": "dev", "dev": "dev",
 }
 
+_FALLBACK_PRODUCTS = ["pick-assist", "greymatter", "intralogistics", "gsb", "rdc", "wms", "sre", "ai-ml"]
+
+
 def _known_products() -> list[str]:
     try:
-        from products_config import ids
-        return ids()
+        from products_config import ids, load
+        result = ids()
+        if not result:   # load() not yet called (e.g. in unit tests)
+            load()
+            result = ids()
+        return result or _FALLBACK_PRODUCTS
     except Exception:
-        return ["pick-assist", "greymatter", "intralogistics", "gsb", "rdc", "wms", "sre", "ai-ml"]
+        return _FALLBACK_PRODUCTS
 
 
 _INTENT_PATTERNS = [
@@ -77,6 +84,26 @@ _INTENT_PATTERNS = [
     (re.compile(r"error|crash|exception|down|timeout|restart|500",  re.I), "system_error"),
     (re.compile(r"version|deployed|release|upgrade|image.tag",     re.I), "deployment"),
 ]
+
+
+_STOPWORDS = frozenset({
+    "is", "are", "was", "were", "has", "have", "had", "do", "does", "did",
+    "in", "of", "at", "by", "for", "with", "to", "from", "on", "about",
+    "a", "an", "the", "and", "or", "but", "not", "it", "its",
+    "that", "this", "which", "who", "what", "where", "when", "how",
+    "terms", "their", "our", "your",
+})
+
+
+def _trim_at_stopword(hint: str) -> str | None:
+    """Keep words up to (not including) the first English function word."""
+    words = hint.split()
+    result = []
+    for w in words:
+        if w.lower() in _STOPWORDS:
+            break
+        result.append(w)
+    return " ".join(result) if result else None
 
 
 def _regex_extract(question: str) -> dict[str, Any]:
@@ -108,15 +135,20 @@ def _regex_extract(question: str) -> dict[str, Any]:
     customer_m = _CUSTOMER_HINTS.search(question)
     customer_hint = customer_m.group(1).strip() if customer_m else None
     if customer_hint:
-        customer_hint = re.sub(
-            r"\b(prod(?:uction)?|staging|uat|test(?:ing)?|dev(?:elopment)?|qa|env|cluster"
-            r"|product[s]?|line[s]?|customer[s]?|client[s]?|warehouse[s]?|name)\b",
-            "", customer_hint, flags=re.I
-        ).strip(" ,.")
-        # Remove product name from customer hint if it slipped in
-        for pid in _known_products():
-            customer_hint = customer_hint.replace(pid, "").replace(pid.replace("-", " "), "")
-        customer_hint = customer_hint.strip(" ,.") or None
+        # Truncate at the first English function word — prevents "GMI is in terms of"
+        # from a query like "WES project for GMI is in terms of development?"
+        customer_hint = _trim_at_stopword(customer_hint)
+        if customer_hint:
+            customer_hint = re.sub(
+                r"\b(prod(?:uction)?|staging|uat|test(?:ing)?|dev(?:elopment)?|qa|env|cluster"
+                r"|product[s]?|line[s]?|customer[s]?|client[s]?|warehouse[s]?|name"
+                r"|deploy(?:ment)?|service[s]?|project[s]?|issue[s]?|error[s]?|status)\b",
+                "", customer_hint, flags=re.I
+            ).strip(" ,.")
+            # Remove product name from customer hint if it slipped in
+            for pid in _known_products():
+                customer_hint = customer_hint.replace(pid, "").replace(pid.replace("-", " "), "")
+            customer_hint = customer_hint.strip(" ,.") or None
 
     return {
         "customer_hint": customer_hint,
