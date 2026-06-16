@@ -4,18 +4,19 @@ Fuzzy Customer + Environment Resolver
 Translates messy natural-language references into registry IDs.
 
 Customer resolution priority:
-  1. Exact ID match              ("sams-club-atlanta")
-  2. Alias match                 (stored aliases: ["samsatl", "sam's club atl"])
+  1. Exact ID / alias match      ("sams-club-atlanta", "samsatl")
+  2. Window scan of full question — every 1–4 word phrase scored against registry
+     handles arbitrary phrasings: "solution numbers for sodimac colombia",
+     "check GMI's prod cluster", "why did sams club atlanta fall behind?"
   3. Token Jaccard similarity    ("samsclub atl" ~ "sams-club-atlanta")
   4. Normalised edit distance    ("samsclub" ~ "sams-club")
-  5. LLM disambiguation          (when score is borderline, ask Ollama)
 
 Environment resolution:
   - Regex on the question text:  "in prod", "dev cluster", "staging broke", etc.
   - Fallback: highest configured env for that customer
 
 Alias learning:
-  - Every time a fuzzy match succeeds, the hint string is stored as an alias
+  - Every time a fuzzy match succeeds, the matched phrase is stored as an alias
     so it resolves instantly next time (zero recomputation).
 """
 from __future__ import annotations
@@ -31,6 +32,20 @@ HIGH_THRESHOLD     = 0.80   # resolve silently
 MEDIUM_THRESHOLD   = 0.55   # resolve with note ("I'm assuming you mean X")
 LOW_THRESHOLD      = 0.30   # ask for confirmation
 UNKNOWN_THRESHOLD  = 0.00   # ask for full clarification + offer to register
+
+# Words that on their own carry no customer-name signal; pure-stopword windows
+# are skipped during the question scan to avoid spurious matches.
+_WINDOW_STOPWORDS = frozenset({
+    "is", "are", "was", "were", "has", "have", "had", "do", "does", "did",
+    "in", "of", "at", "by", "for", "with", "to", "from", "on", "about",
+    "a", "an", "the", "and", "or", "but", "not", "it", "its",
+    "that", "this", "which", "who", "what", "where", "when", "how",
+    "why", "can", "could", "would", "should", "will", "be", "so",
+    "me", "my", "we", "our", "you", "your", "they", "their", "i",
+    "solution", "solutions", "number", "numbers", "query", "question",
+    "data", "list", "tell", "give", "show", "get", "find", "help",
+    "please", "any", "some", "all", "now", "then", "there", "here",
+})
 
 
 # ─── Text normalisation ───────────────────────────────────────────────────────
@@ -73,6 +88,38 @@ def _score(hint: str, candidate_id: str, candidate_name: str,
     jac_id   = _jaccard(hint, candidate_id)
     jac_name = _jaccard(hint, candidate_name)
     return max(id_sim, name_sim, jac_id, jac_name)
+
+
+def _best_window_score_and_phrase(question: str, customer: dict) -> tuple[float, str | None]:
+    """
+    Slide a 1–4 word window over every phrase in the question and return
+    (best_score, best_phrase) for this customer.  Skips windows that are
+    entirely stopwords so generic phrases like "the solution" don't fire.
+
+    This lets us find "sodimac colombia" inside
+    "what are the solution numbers for sodimac colombia?" without needing
+    the entity extractor to correctly isolate that substring first.
+    """
+    words = _norm(question).split()
+    best_score: float = 0.0
+    best_phrase: str | None = None
+    aliases = customer.get("aliases", [])
+    c_id   = customer["id"]
+    c_name = customer["name"]
+
+    for n in range(1, 5):
+        for i in range(len(words) - n + 1):
+            window = words[i:i + n]
+            # Skip if every token is a stopword
+            if all(w in _WINDOW_STOPWORDS for w in window):
+                continue
+            phrase = " ".join(window)
+            s = _score(phrase, c_id, c_name, aliases)
+            if s > best_score:
+                best_score = s
+                best_phrase = phrase
+
+    return best_score, best_phrase
 
 
 # ─── Environment extraction from text ────────────────────────────────────────
@@ -137,44 +184,46 @@ class CustomerResolver:
         """
         Main entry point.
 
-        hint       — raw customer string from the question (may be None)
+        hint       — customer string extracted by the entity extractor (may be None or wrong)
         env_hint   — raw env string from question params or extracted text
-        question   — full question text, used for env extraction if env_hint is None
+        question   — full question text; always scanned for customer names so any
+                     phrasing ("solution numbers for X", "X's prod cluster", etc.) works
         """
         # Extract env from the question text if not supplied
         if not env_hint:
             env_hint = extract_env_hint(question)
 
-        if not hint:
-            return ResolutionResult(
-                needs_input=True,
-                message="Which customer or warehouse are you asking about?",
-            )
-
-        hint_n = _norm(hint)
         customers = self._registry.list_customers()
 
         if not customers:
             from products_config import product_menu
+            display = hint or (question[:40] if question else "this customer")
             return ResolutionResult(
                 needs_input=True,
                 message=(
                     f"No customers are registered yet. "
-                    f"Should I register **'{hint}'** now?\n\n"
+                    f"Should I register **'{display}'** now?\n\n"
                     f"Which products do they use? Reply with the number(s):\n\n"
                     + product_menu()
                 ),
                 candidates=[],
             )
 
-        # ── Score every customer ──────────────────────────────────────────────
-        scored: list[tuple[float, dict]] = []
+        # ── Score every customer using BOTH hint and full-question window scan ─
+        # Taking the max means the hint is a bonus, not a requirement: if the
+        # entity extractor mis-extracted "solution numbers" instead of "sodimac
+        # colombia", the window scan still finds the right customer.
+        scored: list[tuple[float, dict, str | None]] = []  # (score, customer, matched_phrase)
         for c in customers:
-            s = _score(hint, c["id"], c["name"], c.get("aliases", []))
-            scored.append((s, c))
+            hint_score  = _score(hint, c["id"], c["name"], c.get("aliases", [])) if hint else 0.0
+            scan_score, scan_phrase = _best_window_score_and_phrase(question, c) if question else (0.0, None)
+            if hint_score >= scan_score:
+                scored.append((hint_score, c, hint))
+            else:
+                scored.append((scan_score, c, scan_phrase))
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        best_score, best = scored[0]
+        best_score, best, best_phrase = scored[0]
 
         # ── Resolve env within the matched customer ───────────────────────────
         def _pick_env(customer: dict) -> str | None:
@@ -188,16 +237,34 @@ class CustomerResolver:
                     return stage
             return env_hint  # store intent even if not configured yet
 
+        # ── No signal at all → ask ────────────────────────────────────────────
+        if best_score < LOW_THRESHOLD:
+            from products_config import product_menu
+            display = hint or (question[:40] if question else "this customer")
+            return ResolutionResult(
+                confidence  = 0.0,
+                needs_input = True,
+                candidates  = [],
+                message     = (
+                    f"I couldn't identify the customer in your question.\n\n"
+                    f"I can answer from general knowledge right now, "
+                    f"or register this as a new customer.\n\n"
+                    f"Which products does this customer use? Reply with the number(s):\n\n"
+                    + product_menu()
+                ),
+            )
+
         # ── Exact or high-confidence match → resolve silently ─────────────────
         if best_score >= HIGH_THRESHOLD:
-            self._learn_alias(best["id"], hint)
+            if best_phrase:
+                self._learn_alias(best["id"], best_phrase)
             env = _pick_env(best)
             return ResolutionResult(
-                customer_id  = best["id"],
-                env          = env,
-                confidence   = best_score,
+                customer_id   = best["id"],
+                env           = env,
+                confidence    = best_score,
                 needs_confirm = best_score < EXACT_THRESHOLD,
-                message      = (
+                message       = (
                     f"Resolved to '{best['name']}'"
                     + (f" ({env} env)" if env else "")
                     + ("" if best_score >= EXACT_THRESHOLD else f" (confidence {best_score:.0%})")
@@ -206,21 +273,22 @@ class CustomerResolver:
 
         # ── Medium confidence → resolve but mention assumption ─────────────────
         if best_score >= MEDIUM_THRESHOLD:
-            self._learn_alias(best["id"], hint)
+            if best_phrase:
+                self._learn_alias(best["id"], best_phrase)
             env = _pick_env(best)
             return ResolutionResult(
-                customer_id  = best["id"],
-                env          = env,
-                confidence   = best_score,
+                customer_id   = best["id"],
+                env           = env,
+                confidence    = best_score,
                 needs_confirm = True,
-                message      = (
+                message       = (
                     f"I'm assuming you mean **{best['name']}** — "
                     f"let me know if that's wrong."
                 ),
             )
 
         # ── Low confidence → ask with candidates ──────────────────────────────
-        top3 = [(s, c) for s, c in scored[:3] if s >= LOW_THRESHOLD]
+        top3 = [(s, c) for s, c, _ in scored[:3] if s >= LOW_THRESHOLD]
         if top3:
             options = "\n".join(
                 f"  • {c['name']} (id: `{c['id']}`)" for _, c in top3
@@ -230,25 +298,16 @@ class CustomerResolver:
                 needs_input  = True,
                 candidates   = [(c["id"], c["name"], s) for s, c in top3],
                 message      = (
-                    f"I couldn't confidently match **'{hint}'** to a customer. "
+                    f"I couldn't confidently identify the customer. "
                     f"Did you mean one of these?\n{options}\n\n"
                     f"Or say 'none of those' to register a new customer."
                 ),
             )
 
-        # ── No match → offer to register ──────────────────────────────────────
-        from products_config import product_menu
+        # Safety fallthrough (shouldn't be reached; best_score >= LOW_THRESHOLD above)
         return ResolutionResult(
-            confidence  = 0.0,
-            needs_input = True,
-            candidates  = [],
-            message     = (
-                f"I don't have a customer matching **'{hint}'** in the registry.\n\n"
-                f"I can answer from general knowledge right now, "
-                f"or register this as a new customer.\n\n"
-                f"Which products does this customer use? Reply with the number(s):\n\n"
-                + product_menu()
-            ),
+            needs_input=True,
+            message="Which customer or warehouse are you asking about?",
         )
 
     def _learn_alias(self, customer_id: str, hint: str):
