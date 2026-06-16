@@ -144,7 +144,7 @@ def _save_sync_state(state: dict):
 
 
 # ---------------------------------------------------------------------------
-# Branch filtering
+# Branch filtering + customer-env discovery
 # ---------------------------------------------------------------------------
 
 # Branches that carry meaningful, stable knowledge for the knowledge base.
@@ -179,6 +179,51 @@ def _signal_branches(extra: list[str]) -> list[str]:
     return base
 
 
+# Known environment suffixes used in deployment repo branch names.
+# Branch convention: {customer-id}-{env}
+#   sams-club-prod          → customer=sams-club,         env=prod
+#   sams-club-atlanta-prod  → customer=sams-club-atlanta,  env=prod
+#   sodimac-colombia-staging → customer=sodimac-colombia,  env=staging
+# Location is part of the customer ID, NOT a separate field.
+_BRANCH_ENV_SUFFIXES = {
+    "prod":        "prod",
+    "production":  "prod",
+    "staging":     "staging",
+    "uat":         "staging",
+    "preprod":     "staging",
+    "pre":         "staging",   # handles "pre-prod" split as ["pre","prod"] edge case
+    "dev":         "dev",
+    "development": "dev",
+    "testing":     "testing",
+    "test":        "testing",
+    "qa":          "testing",
+}
+
+
+def _parse_customer_branch(branch_name: str) -> tuple[str, str] | None:
+    """
+    Parse a deployment-repo branch name into (customer_id, env).
+
+    Returns None if the branch doesn't look like a customer-env branch
+    (e.g. main, develop, release/*, hotfix/* — those are code branches).
+    """
+    parts = branch_name.replace("/", "-").split("-")
+    if len(parts) < 2:
+        return None
+    env = _BRANCH_ENV_SUFFIXES.get(parts[-1].lower())
+    if not env:
+        return None
+    customer_id = "-".join(parts[:-1]).lower().strip("-")
+    if not customer_id:
+        return None
+    return customer_id, env
+
+
+def _customer_name_from_id(customer_id: str) -> str:
+    """Turn a kebab-case ID into a display name: sams-club-atlanta → Sams Club Atlanta."""
+    return " ".join(w.capitalize() for w in customer_id.replace("-", " ").split())
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -205,6 +250,9 @@ class Config:
     # All non-feature branches are indexed; branch names are parsed for customer discovery.
     # Example: greyorange/greymatter-deployment,greyorange/pick-assist-helm-charts
     devops_repos: list = field(default_factory=list)
+    # Intelligence agent URL — used to auto-register customers/envs discovered
+    # from deployment repo branches. Leave blank to skip auto-registration.
+    agent_url: str = ""
 
     searchly_url: str = "http://localhost:8081"
     searchly_tenant: str = "default"
@@ -244,6 +292,7 @@ def load_config(args) -> Config:
         github_org=opt("GITHUB_ORG"),
         git_branches=_signal_branches(csv("GIT_BRANCHES")),
         devops_repos=csv("DEVOPS_REPOS"),
+        agent_url=opt("AGENT_URL", "http://intelligence-agent:8084").rstrip("/"),
 
         searchly_url=opt("SEARCHLY_URL", "http://localhost:8081").rstrip("/"),
         searchly_tenant=opt("SEARCHLY_TENANT", "default"),
@@ -703,11 +752,14 @@ class RepoIndexer:
           - "org/repo-name"          → used as-is under github.com
           - "https://github.com/..."  → full URL
 
-        TODO: once the branch naming convention in these repos is confirmed,
-        add auto-registration of customer/env into the customer registry here.
-        Pattern will be something like: parse branch name → extract (customer_id, env)
-        → call customer_registry.upsert(customer_id, env, k8s_context, namespace).
+        Branch naming convention: {customer-id}-{env}
+          sams-club-prod          → (sams-club, prod)
+          sams-club-atlanta-prod  → (sams-club-atlanta, prod)
+          sodimac-colombia-staging → (sodimac-colombia, staging)
+        Location tokens (atlanta, colombia, …) are part of the customer ID.
         """
+        agent_url = self.cfg.agent_url
+
         for spec in repo_specs:
             # Resolve to a clone URL
             if spec.startswith("http") or spec.startswith("git@"):
@@ -732,10 +784,15 @@ class RepoIndexer:
             if docs:
                 poster.post_batch(docs, workers=self.cfg.batch_size)
 
-            # Index every non-noise branch (each = one customer env in deployment repos)
+            # Index every non-noise branch + auto-register customers
             branches = self._list_all_branches(auth_url)
             log.info("DevOps repo %s: %d non-noise branches", repo_name, len(branches))
             for branch_name, _ in branches:
+                parsed = _parse_customer_branch(branch_name)
+                if parsed and agent_url:
+                    customer_id, env = parsed
+                    self._register_customer_env(agent_url, customer_id, env)
+
                 docs, new_sha, state_key = self._index_repo(
                     clone_url, repo_name, "devops",
                     exts=self.include_exts, branch=branch_name
@@ -744,6 +801,41 @@ class RepoIndexer:
                     updated_state[state_key] = new_sha
                 if docs:
                     poster.post_batch(docs, workers=self.cfg.batch_size)
+
+    def _register_customer_env(self, agent_url: str, customer_id: str, env: str):
+        """
+        Upsert a customer + environment into the intelligence agent registry.
+        Both calls are idempotent — safe to call on every sync run.
+        """
+        customer_name = _customer_name_from_id(customer_id)
+        lifecycle = env if env in ("prod", "staging", "dev", "testing") else "solution"
+
+        # 1. Create customer (409 = already exists → fine)
+        try:
+            r = requests.post(
+                f"{agent_url}/api/v1/customers",
+                json={"id": customer_id, "name": customer_name, "lifecycle_stage": lifecycle},
+                timeout=10,
+            )
+            if r.status_code not in (200, 201, 409):
+                log.warning("Customer register %s → HTTP %s: %s", customer_id, r.status_code, r.text[:200])
+        except Exception as exc:
+            log.warning("Customer register %s failed: %s", customer_id, exc)
+            return
+
+        # 2. Upsert environment (cluster details filled later by ops)
+        try:
+            r = requests.post(
+                f"{agent_url}/api/v1/customers/{customer_id}/environments/{env}",
+                json={"lifecycle_stage": lifecycle},
+                timeout=10,
+            )
+            if r.status_code not in (200, 201, 409):
+                log.warning("Env register %s/%s → HTTP %s: %s", customer_id, env, r.status_code, r.text[:200])
+            else:
+                log.info("Registered customer env: %s / %s", customer_id, env)
+        except Exception as exc:
+            log.warning("Env register %s/%s failed: %s", customer_id, env, exc)
 
     def _remote_sha(self, auth_url: str, branch: str | None = None) -> str | None:
         """
