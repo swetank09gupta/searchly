@@ -173,19 +173,8 @@ async def run_agent(
     tool_results: dict[str, Any] = {}
     answer = ""
 
-    if not operational:
-        # Solution phase or knowledge-only query — single-shot, no tool loop
-        # Still allow search_knowledge if the model wants to call it
-        answer = await _generate(ollama_url, ollama_model, messages, tools=None)
-        return {
-            "answer":        answer or _no_answer(stage, question),
-            "tools_called":  [],
-            "tool_results":  {},
-            "is_operational": False,
-            "env_used":      env_name,
-        }
-
-    # ── Operational agentic loop: Planner → Execution → Synthesis ───────────
+    # ── Agentic loop: Planner → Execution → Synthesis ───────────────────────
+    # search_knowledge is always available; live cluster tools only when cluster exists.
     _RUNTIME = {
         "customer_obj":   tools_customer,
         "searchly_url":   searchly_url,
@@ -195,7 +184,8 @@ async def run_agent(
     # Phase 1: Planning — ask LLM what tools to call and in what order
     tool_calls_to_run = await _plan_tools(
         ollama_url, ollama_model, messages, tools_customer, customer_id,
-        searchly_url, searchly_tenant
+        searchly_url, searchly_tenant,
+        knowledge_only=(not operational),
     )
 
     # Phase 2: Execution — run all planned tools
@@ -248,21 +238,32 @@ async def run_agent(
         "answer":          (answer or "").strip() or _no_answer(stage, question),
         "tools_called":    list(dict.fromkeys(tools_called)),
         "tool_results":    tool_results,
-        "is_operational":  True,
+        "is_operational":  operational,
         "env_used":        env_name,
     }
+
+
+_LIVE_CLUSTER_TOOLS = frozenset({"get_logs", "get_deployment_state", "get_pod_status", "list_log_indices"})
 
 
 async def _plan_tools(
     ollama_url: str, ollama_model: str, messages: list[dict],
     tools_customer: dict | None, customer_id: str | None,
     searchly_url: str, searchly_tenant: str,
+    knowledge_only: bool = False,
 ) -> list[dict]:
     """
     Planner phase: ask the LLM to generate a list of tool calls without executing them.
     Returns a list of {function: {name, arguments}} dicts, capped at MAX_TOOL_ROUNDS.
     Falls back to an empty list on failure (caller then skips to synthesis with no tool data).
+
+    knowledge_only=True: only search_knowledge is offered (no live cluster tools).
     """
+    available_tools = [
+        td["function"]["name"]
+        for td in TOOL_DEFINITIONS
+        if not (knowledge_only and td["function"]["name"] in _LIVE_CLUSTER_TOOLS)
+    ]
     plan_messages = messages + [{
         "role":    "user",
         "content": (
@@ -270,9 +271,7 @@ async def _plan_tools(
             "Reply with ONLY a JSON array of tool calls, no explanation. Format:\n"
             '[{"function":{"name":"<tool>","arguments":{<args>}}}, ...]\n'
             "Limit to at most 5 tool calls. Available tools: "
-            + ", ".join(TOOL_DEFINITIONS[t]["function"]["name"]
-                        if isinstance(TOOL_DEFINITIONS[t], dict) else TOOL_DEFINITIONS[t].get("function", {}).get("name", "")
-                        for t in range(len(TOOL_DEFINITIONS)))
+            + ", ".join(available_tools)
         ),
     }]
     try:
@@ -286,13 +285,16 @@ async def _plan_tools(
         tool_calls = json.loads(m.group(0))
         if not isinstance(tool_calls, list):
             return []
-        # Validate and cap
+        # Validate, cap, and filter out live-cluster tools when not available
         valid = []
         for tc in tool_calls[:MAX_TOOL_ROUNDS]:
             if isinstance(tc, dict) and "function" in tc:
                 fn_name = tc["function"].get("name", "")
-                if fn_name in TOOL_REGISTRY:
-                    valid.append(tc)
+                if fn_name not in TOOL_REGISTRY:
+                    continue
+                if knowledge_only and fn_name in _LIVE_CLUSTER_TOOLS:
+                    continue
+                valid.append(tc)
         log.info("Planner produced %d tool calls: %s",
                  len(valid), [tc["function"]["name"] for tc in valid])
         return valid
