@@ -120,3 +120,5 @@ These three are independent, can be done in parallel, and require no schema chan
 - [x] HTTP/1.1 forced on all 5 Java HTTP clients (EmbeddingClient, WarehouseAgentClient, RerankClient, KnnSearchClient, OllamaClient) — Java 11 defaults to HTTP/2 but FastAPI/uvicorn and Ollama only support HTTP/1.1
 - [x] Knowledge-only planner bypass — `llama3.2:3b` unreliable for JSON tool arrays; search_knowledge auto-called when no live cluster configured
 - [x] Window-scan entity resolution in `resolver.py` — 1–4 word sliding window over full question; any phrasing resolves customer regardless of sentence structure or prepositions
+- [x] DevOps repo branch sync — signal branches hardcoded; `feature/*`, `dev/*` etc permanently excluded; `greymatter-deployment`, `pick-assist-helm-charts`, `jenkins` configured
+- [x] Customer auto-registration from DevOps repo branches — `{customer-id}-{env}` branch convention parsed on each sync; idempotent POST to intelligence-agent `/api/v1/customers` + `/api/v1/customers/{id}/environments/{env}`

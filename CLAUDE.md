@@ -206,6 +206,9 @@ Roles are JWT claims, enforced via Spring `@PreAuthorize` + `TenantSecurityFilte
 - **GitHub**: language-aware chunking (Python=AST, Java=regex, fallback=2000-char text); ADR/architecture files kept whole (<12K)
 - **Sync schedule**: Track A (60min) — deployment state; Track B (4h) — Jira + Confluence + repos
 - **State**: `.sync_state.json` on Docker volume
+- **Branch filtering**: signal branches only — `develop`, `master`, `main`, `release/*`, `release-*`, `hotfix/*`, `hotfix-*` always included; `feature/*`, `dev/*`, `bugfix/*`, `dependabot/*` etc permanently blocked by `_NOISE_BRANCH_RE`. `GIT_BRANCHES` env var adds extras to signal list.
+- **DevOps repos**: `DEVOPS_REPOS=greyorange/greymatter-deployment,greyorange/pick-assist-helm-charts,greyorange/jenkins` — indexed as separate target; every non-noise branch is indexed (each branch = one customer environment)
+- **Customer auto-registration**: DevOps repo branches follow `{customer-id}-{env}` convention (e.g. `sams-club-atlanta-prod`, `sodimac-colombia-staging`). Location tokens (atlanta, colombia) are part of the customer ID. On each sync run: `_parse_customer_branch()` extracts `(customer_id, env)`, then `POST /api/v1/customers` + `POST /api/v1/customers/{id}/environments/{env}` on intelligence-agent (idempotent). `AGENT_URL` defaults to `http://intelligence-agent:8084`.
 
 ---
 
