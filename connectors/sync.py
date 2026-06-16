@@ -144,6 +144,42 @@ def _save_sync_state(state: dict):
 
 
 # ---------------------------------------------------------------------------
+# Branch filtering
+# ---------------------------------------------------------------------------
+
+# Branches that carry meaningful, stable knowledge for the knowledge base.
+# feature/*, dev/*, bugfix/*, and short-lived CI branches are excluded — they
+# are orders of magnitude more numerous than signal branches and contain
+# work-in-progress noise rather than stable knowledge.
+_SIGNAL_BRANCH_PATTERNS = [
+    "develop",
+    "release/*",
+    "release-*",
+    "hotfix/*",
+    "hotfix-*",
+]
+
+# Pre-compiled regex matching any branch name we will NOT index on app repos.
+# Anything not matching a signal pattern and not being main/master/HEAD is noise.
+_NOISE_BRANCH_RE = re.compile(
+    r"^(feature|feat|dev|bugfix|fix|chore|deps|dependabot|renovate|ci|test|wip|tmp|temp)/",
+    re.IGNORECASE,
+)
+
+
+def _signal_branches(extra: list[str]) -> list[str]:
+    """
+    Return the canonical signal-branch list merged with any caller-supplied extras.
+    Always includes the hardcoded safe set; caller extras are appended if not already present.
+    """
+    base = list(_SIGNAL_BRANCH_PATTERNS)
+    for p in extra:
+        if p and p not in base:
+            base.append(p)
+    return base
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -161,10 +197,14 @@ class Config:
 
     github_token: str = ""
     github_org: str = ""
-    # Branch patterns to index in addition to the default branch.
-    # Supports exact names ("develop") and globs ("release/*", "hotfix/*").
-    # Empty list = default branch only.
+    # Signal branches indexed on every app repo (in addition to the default branch).
+    # Hardcoded — we never want feature/* or dev/* branches (too many, too noisy).
+    # The GIT_BRANCHES env var can ADD to this list but cannot remove from it.
     git_branches: list = field(default_factory=list)
+    # Deployment/DevOps repos whose branches represent live customer environments.
+    # All non-feature branches are indexed; branch names are parsed for customer discovery.
+    # Example: greyorange/greymatter-deployment,greyorange/pick-assist-helm-charts
+    devops_repos: list = field(default_factory=list)
 
     searchly_url: str = "http://localhost:8081"
     searchly_tenant: str = "default"
@@ -202,7 +242,8 @@ def load_config(args) -> Config:
 
         github_token=opt("GIT_TOKEN"),
         github_org=opt("GITHUB_ORG"),
-        git_branches=csv("GIT_BRANCHES"),
+        git_branches=_signal_branches(csv("GIT_BRANCHES")),
+        devops_repos=csv("DEVOPS_REPOS"),
 
         searchly_url=opt("SEARCHLY_URL", "http://localhost:8081").rstrip("/"),
         searchly_tenant=opt("SEARCHLY_TENANT", "default"),
@@ -542,11 +583,10 @@ class RepoIndexer:
                  len(repo_product_map),
                  len(work) - len(repo_product_map))
 
-        branch_patterns = self.cfg.git_branches  # e.g. ["develop", "release/*"]
-        if branch_patterns:
-            log.info("Branch patterns: default + %s", branch_patterns)
+        branch_patterns = self.cfg.git_branches  # always includes signal branches
+        log.info("Signal branch patterns: default + %s", branch_patterns)
 
-        # ── Step 3: index each repo (default branch + any configured branches) ─
+        # ── Step 3: index each app repo (default branch + signal branches) ──────
         for repo_name, (product_name, priority) in sorted(work.items()):
             exts = self.include_exts if priority != "low" else self.DOCS_ONLY_EXTS
             clone_url = self._resolve_url(repo_name)
@@ -561,20 +601,28 @@ class RepoIndexer:
             if docs:
                 poster.post_batch(docs, workers=self.cfg.batch_size)
 
-            # Index any additional branch patterns.
+            # Index signal branches (develop, release/*, hotfix/*, etc.)
             # _resolve_branches does a single ls-remote call per pattern, expanding
-            # globs — so "release/*" automatically picks up every release branch,
-            # including newly created ones, on every sync cycle.
-            if branch_patterns:
-                for branch_name, remote_sha in self._resolve_branches(auth_url, branch_patterns):
-                    docs, new_sha, state_key = self._index_repo(
-                        clone_url, repo_name, product_name,
-                        exts=exts, branch=branch_name
-                    )
-                    if new_sha:
-                        updated_state[state_key] = new_sha
-                    if docs:
-                        poster.post_batch(docs, workers=self.cfg.batch_size)
+            # globs — new branches matching a pattern are picked up automatically.
+            for branch_name, _ in self._resolve_branches(auth_url, branch_patterns):
+                docs, new_sha, state_key = self._index_repo(
+                    clone_url, repo_name, product_name,
+                    exts=exts, branch=branch_name
+                )
+                if new_sha:
+                    updated_state[state_key] = new_sha
+                if docs:
+                    poster.post_batch(docs, workers=self.cfg.batch_size)
+
+        # ── Step 4: DevOps / deployment repos ────────────────────────────────────
+        # These repos are NOT auto-discovered from the org — they are maintained
+        # separately because their branches map to customer environments, not
+        # product releases.  We index ALL non-noise branches so each customer's
+        # deployment config is searchable.
+        if self.cfg.devops_repos:
+            log.info("Syncing %d DevOps repos: %s", len(self.cfg.devops_repos),
+                     self.cfg.devops_repos)
+            self._index_devops_repos(self.cfg.devops_repos, poster, updated_state)
 
         _save_sync_state(updated_state)
 
@@ -617,6 +665,85 @@ class RepoIndexer:
             except Exception as exc:
                 log.warning("ls-remote failed for pattern '%s': %s", pattern, exc)
         return list(found.items())
+
+    def _list_all_branches(self, auth_url: str) -> list[tuple[str, str]]:
+        """
+        Return all branches in a remote repo as (branch_name, sha) tuples,
+        excluding noise branches (feature/*, dev/*, dependabot/*, etc.).
+        Used for DevOps repos where every non-noise branch may be a customer env.
+        """
+        try:
+            r = subprocess.run(
+                ["git", "ls-remote", "--heads", auth_url],
+                capture_output=True, text=True, timeout=30
+            )
+            if r.returncode != 0:
+                return []
+            results = []
+            for line in r.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                sha, ref = parts
+                branch_name = ref.replace("refs/heads/", "")
+                if not _NOISE_BRANCH_RE.match(branch_name):
+                    results.append((branch_name, sha))
+            return results
+        except Exception as exc:
+            log.warning("ls-remote --heads failed for %s: %s", auth_url, exc)
+            return []
+
+    def _index_devops_repos(self, repo_specs: list[str], poster, updated_state: dict):
+        """
+        Index DevOps/deployment repos.  Unlike app repos, every non-noise branch
+        is indexed — each branch typically corresponds to one customer environment.
+
+        repo_specs can be:
+          - "repo-name"              → resolved via github_org
+          - "org/repo-name"          → used as-is under github.com
+          - "https://github.com/..."  → full URL
+
+        TODO: once the branch naming convention in these repos is confirmed,
+        add auto-registration of customer/env into the customer registry here.
+        Pattern will be something like: parse branch name → extract (customer_id, env)
+        → call customer_registry.upsert(customer_id, env, k8s_context, namespace).
+        """
+        for spec in repo_specs:
+            # Resolve to a clone URL
+            if spec.startswith("http") or spec.startswith("git@"):
+                clone_url = spec
+            elif "/" in spec:
+                clone_url = f"https://github.com/{spec}"
+            elif self.github_org:
+                clone_url = f"https://github.com/{self.github_org}/{spec}"
+            else:
+                log.warning("Cannot resolve devops repo '%s' — set GITHUB_ORG or use org/repo", spec)
+                continue
+
+            repo_name = clone_url.rstrip("/").split("/")[-1].removesuffix(".git")
+            auth_url  = self._auth_url(clone_url)
+
+            # Always index the default branch
+            docs, new_sha, state_key = self._index_repo(
+                clone_url, repo_name, "devops", exts=self.include_exts, branch=None
+            )
+            if new_sha:
+                updated_state[state_key] = new_sha
+            if docs:
+                poster.post_batch(docs, workers=self.cfg.batch_size)
+
+            # Index every non-noise branch (each = one customer env in deployment repos)
+            branches = self._list_all_branches(auth_url)
+            log.info("DevOps repo %s: %d non-noise branches", repo_name, len(branches))
+            for branch_name, _ in branches:
+                docs, new_sha, state_key = self._index_repo(
+                    clone_url, repo_name, "devops",
+                    exts=self.include_exts, branch=branch_name
+                )
+                if new_sha:
+                    updated_state[state_key] = new_sha
+                if docs:
+                    poster.post_batch(docs, workers=self.cfg.batch_size)
 
     def _remote_sha(self, auth_url: str, branch: str | None = None) -> str | None:
         """
