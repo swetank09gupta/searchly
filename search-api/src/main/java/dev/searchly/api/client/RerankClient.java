@@ -32,7 +32,7 @@ public class RerankClient {
             ObjectMapper mapper) {
         this.baseUrl = baseUrl;
         this.mapper = mapper;
-        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        this.http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).connectTimeout(Duration.ofSeconds(10)).build();
     }
 
     /**

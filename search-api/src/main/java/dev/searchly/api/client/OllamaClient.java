@@ -36,6 +36,7 @@ public class OllamaClient {
         this.model = model;
         this.mapper = mapper;
         this.http = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)  // Ollama/FastAPI don't support HTTP/2
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
     }

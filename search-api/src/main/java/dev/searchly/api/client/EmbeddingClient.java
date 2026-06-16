@@ -29,6 +29,7 @@ public class EmbeddingClient {
         this.baseUrl = baseUrl;
         this.mapper = mapper;
         this.http = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)  // FastAPI/uvicorn doesn't support HTTP/2
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
     }

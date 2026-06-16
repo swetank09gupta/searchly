@@ -37,7 +37,7 @@ public class KnnSearchClient {
             ObjectMapper mapper) {
         this.osBase = scheme + "://" + host + ":" + port;
         this.mapper = mapper;
-        this.http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        this.http = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).connectTimeout(Duration.ofSeconds(10)).build();
     }
 
     public record ChunkHit(String chunkId, String docId, String title, String chunkText,

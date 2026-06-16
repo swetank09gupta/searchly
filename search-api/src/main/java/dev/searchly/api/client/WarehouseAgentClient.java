@@ -35,6 +35,7 @@ public class WarehouseAgentClient {
         this.mapper = mapper;
         this.enabled = agentUrl != null && !agentUrl.isBlank();
         this.http = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)  // FastAPI/uvicorn doesn't support HTTP/2
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
         if (this.enabled)
