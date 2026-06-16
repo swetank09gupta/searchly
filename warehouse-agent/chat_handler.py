@@ -170,8 +170,10 @@ class ChatHandler:
             resolution.customer_id, e_hint or resolution.env
         )
 
-        # Env mentioned but not yet configured → offer to set it up
-        if e_hint and not env_config and e_hint in LIFECYCLE_ORDER[1:]:
+        # Env mentioned but not yet configured → offer to set it up.
+        # Skip this for knowledge-only questions (e.g. "dev work remaining") where
+        # "dev" was extracted as an env hint but no live cluster data is needed.
+        if e_hint and not env_config and e_hint in LIFECYCLE_ORDER[1:] and _is_operational(message):
             ask = (
                 f"**{customer_record.get('name', 'This customer')}** doesn't have a **{e_hint}** "
                 f"environment configured yet. "
@@ -345,7 +347,7 @@ class ChatHandler:
             resolution.customer_id, e_hint or resolution.env
         )
 
-        if e_hint and not env_config and e_hint in LIFECYCLE_ORDER[1:]:
+        if e_hint and not env_config and e_hint in LIFECYCLE_ORDER[1:] and _is_operational(message):
             ask = (
                 f"**{customer_record.get('name', 'This customer')}** doesn't have a **{e_hint}** "
                 f"environment configured yet. "
