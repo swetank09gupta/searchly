@@ -1470,13 +1470,26 @@ def main():
         if cfg.jira_url and cfg.jira_token:
             jira = JiraFetcher(cfg)
             projects = cfg.jira_projects or jira.list_projects()
+            full_interval_s = int(os.environ.get("SYNC_FULL_INTERVAL_HOURS", "4")) * 3600
+            skipped = []
             log.info("Syncing Jira: %s", projects)
             for proj in projects:
+                if not cfg.force:
+                    state = _load_sync_state()
+                    completed_at = state.get(f"jira_project_{proj}_completed_at")
+                    if completed_at and (time.time() - float(completed_at)) < full_interval_s:
+                        skipped.append(proj)
+                        continue
                 try:
                     docs = [part for d in jira.fetch_issues(proj) for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
+                    state = _load_sync_state()
+                    state[f"jira_project_{proj}_completed_at"] = int(time.time())
+                    _save_sync_state(state)
                 except Exception as e:
                     log.error("Jira %s: %s", proj, e)
+            if skipped:
+                log.info("Jira: skipped %d recently-synced projects: %s", len(skipped), skipped)
             poster.purge_stale("jira", sync_started_at)
         else:
             log.info("Jira not configured, skipping.")
@@ -1486,13 +1499,26 @@ def main():
         if cfg.confluence_url and cfg.confluence_token:
             conf = ConfluenceFetcher(cfg)
             spaces = cfg.confluence_spaces or conf.list_spaces()
+            full_interval_s = int(os.environ.get("SYNC_FULL_INTERVAL_HOURS", "4")) * 3600
+            skipped = []
             log.info("Syncing Confluence: %s", spaces)
             for space in spaces:
+                if not cfg.force:
+                    state = _load_sync_state()
+                    completed_at = state.get(f"confluence_space_{space}_completed_at")
+                    if completed_at and (time.time() - float(completed_at)) < full_interval_s:
+                        skipped.append(space)
+                        continue
                 try:
                     docs = [part for d in conf.fetch_pages(space) for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
+                    state = _load_sync_state()
+                    state[f"confluence_space_{space}_completed_at"] = int(time.time())
+                    _save_sync_state(state)
                 except Exception as e:
                     log.error("Confluence %s: %s", space, e)
+            if skipped:
+                log.info("Confluence: skipped %d recently-synced spaces: %s", len(skipped), skipped)
             poster.purge_stale("confluence", sync_started_at)
         else:
             log.info("Confluence not configured, skipping.")
