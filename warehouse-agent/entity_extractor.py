@@ -171,7 +171,7 @@ async def extract_entities(question: str, ollama_url: str,
     """
     prompt = _EXTRACT_PROMPT.replace("{question}", question)
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(
                 f"{ollama_url}/api/generate",
                 json={"model": ollama_model, "prompt": prompt, "stream": False},
