@@ -122,3 +122,6 @@ These three are independent, can be done in parallel, and require no schema chan
 - [x] Window-scan entity resolution in `resolver.py` — 1–4 word sliding window over full question; any phrasing resolves customer regardless of sentence structure or prepositions
 - [x] DevOps repo branch sync — signal branches hardcoded; `feature/*`, `dev/*` etc permanently excluded; `greymatter-deployment`, `pick-assist-helm-charts`, `jenkins` configured
 - [x] Customer auto-registration from DevOps repo branches — `{customer-id}-{env}` branch convention parsed on each sync; idempotent POST to intelligence-agent `/api/v1/customers` + `/api/v1/customers/{id}/environments/{env}`
+- [x] Container restart resilience — scheduler checks `last_shared_completed_at` at startup; skips initial full sync if completed within `SYNC_FULL_INTERVAL_HOURS`
+- [x] Incremental Jira sync — delta JQL `AND updated >= last_completed_at` on every run after first; `--force` bypasses
+- [x] Incremental Confluence sync — delta CQL search `lastModified >= last_completed_at` on every run after first; switches from recursive content API to flat search API for delta mode

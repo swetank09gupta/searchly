@@ -201,11 +201,12 @@ Roles are JWT claims, enforced via Spring `@PreAuthorize` + `TenantSecurityFilte
 ---
 
 ## Connectors
-- **Jira**: JQL cursor pagination, 150ms pacing, max 1000 issues/project; re-fetches all on each cycle (no delta — gap)
-- **Confluence**: recursive page fetch (depth ≤8), HTML stripped
-- **GitHub**: language-aware chunking (Python=AST, Java=regex, fallback=2000-char text); ADR/architecture files kept whole (<12K)
+- **Jira**: JQL cursor pagination, 150ms pacing, max 1000 issues/project. **Delta sync**: second run onwards adds `AND updated >= last_completed_at` to JQL — only changed issues fetched. First run: full fetch.
+- **Confluence**: recursive page fetch (depth ≤8), HTML stripped. **Delta sync**: second run onwards uses CQL search API (`lastModified >= last_completed_at`) — flat result, no recursive walk needed. First run: full recursive fetch.
+- **GitHub**: language-aware chunking (Python=AST, Java=regex, fallback=2000-char text); ADR/architecture files kept whole (<12K). Incremental via `git ls-remote` SHA check — unchanged repos skipped entirely.
 - **Sync schedule**: Track A (60min) — deployment state; Track B (4h) — Jira + Confluence + repos
-- **State**: `.sync_state.json` on Docker volume
+- **State**: `.sync_state.json` on Docker volume. Keys: git repo SHAs, `jira_project_{KEY}_completed_at`, `confluence_space_{KEY}_completed_at`, `last_shared_completed_at` (epoch seconds). All writes are append/upsert — safe across restarts.
+- **Container restart resilience**: scheduler checks `last_shared_completed_at` at startup — skips initial full blast if completed within 4h. Per-project/space timestamps mean already-done work is skipped on resume; remaining items do their first-run full fetch and stamp themselves.
 - **Branch filtering**: signal branches only — `develop`, `master`, `main`, `release/*`, `release-*`, `hotfix/*`, `hotfix-*` always included; `feature/*`, `dev/*`, `bugfix/*`, `dependabot/*` etc permanently blocked by `_NOISE_BRANCH_RE`. `GIT_BRANCHES` env var adds extras to signal list.
 - **DevOps repos**: `DEVOPS_REPOS=greyorange/greymatter-deployment,greyorange/pick-assist-helm-charts,greyorange/jenkins` — indexed as separate target; every non-noise branch is indexed (each branch = one customer environment)
 - **Customer auto-registration**: DevOps repo branches follow `{customer-id}-{env}` convention (e.g. `sams-club-atlanta-prod`, `sodimac-colombia-staging`). Location tokens (atlanta, colombia) are part of the customer ID. On each sync run: `_parse_customer_branch()` extracts `(customer_id, env)`, then `POST /api/v1/customers` + `POST /api/v1/customers/{id}/environments/{env}` on intelligence-agent (idempotent). `AGENT_URL` defaults to `http://intelligence-agent:8084`.
