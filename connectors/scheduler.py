@@ -36,11 +36,13 @@ Startup sequence:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import requests
 
@@ -55,6 +57,20 @@ SEARCHLY_URL      = os.getenv("SEARCHLY_URL",              "http://search-api:80
 DEPLOY_INTERVAL_S = int(os.getenv("SYNC_DEPLOY_INTERVAL_MIN",  "60"))  * 60
 FULL_INTERVAL_S   = int(os.getenv("SYNC_FULL_INTERVAL_HOURS",  "4"))   * 3600
 STARTUP_WAIT_S    = int(os.getenv("SYNC_STARTUP_WAIT_SEC",     "90"))
+
+_STATE_FILE = Path(os.getenv("SYNC_STATE_DIR", "/data")) / ".sync_state.json"
+
+
+def _last_shared_completed_ago() -> float | None:
+    """Return seconds since last successful shared sync, or None if never."""
+    try:
+        state = json.loads(_STATE_FILE.read_text())
+        ts = state.get("last_shared_completed_at")
+        if ts:
+            return time.time() - float(ts)
+    except Exception:
+        pass
+    return None
 
 
 def _wait_for_searchly():
@@ -93,13 +109,25 @@ def run():
     time.sleep(STARTUP_WAIT_S)
 
     # ── Initial runs ──────────────────────────────────────────────────────────
-    log.info("=== INITIAL: Full shared sync (Jira + Confluence + repos) ===")
-    _run("shared", "--only", "shared")
+    ago = _last_shared_completed_ago()
+    if ago is not None and ago < FULL_INTERVAL_S:
+        log.info(
+            "=== SKIPPING initial shared sync — last run completed %.0f min ago "
+            "(interval is %d h) ===",
+            ago / 60,
+            FULL_INTERVAL_S // 3600,
+        )
+    else:
+        log.info("=== INITIAL: Full shared sync (Jira + Confluence + repos) ===")
+        _run("shared", "--only", "shared")
 
     log.info("=== INITIAL: Deployment state (all customers, all envs) ===")
     _run("deploy", "--only", "all-customers-deploy")
 
-    last_full   = time.monotonic()
+    # Seed last_full from state file so the interval counts from the actual
+    # last completion, not from container startup time.
+    ago = _last_shared_completed_ago()
+    last_full   = time.monotonic() - (ago if ago is not None else FULL_INTERVAL_S)
     last_deploy = time.monotonic()
 
     log.info(

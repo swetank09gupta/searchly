@@ -1506,6 +1506,13 @@ def main():
         else:
             log.info("products.yml not loaded, skipping repos.")
 
+    # Stamp completion time so the scheduler can skip a redundant re-run on
+    # container restart if the last full sync finished within the interval.
+    if only in ("shared", None):
+        state = _load_sync_state()
+        state["last_shared_completed_at"] = int(time.time())
+        _save_sync_state(state)
+
     # ── Deployment state: single customer, all envs ───────────────────────
     if only == "customer":
         if not args.customer:
