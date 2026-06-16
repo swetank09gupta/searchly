@@ -109,7 +109,8 @@ def _regex_extract(question: str) -> dict[str, Any]:
     customer_hint = customer_m.group(1).strip() if customer_m else None
     if customer_hint:
         customer_hint = re.sub(
-            r"\b(prod(?:uction)?|staging|uat|test(?:ing)?|dev(?:elopment)?|qa|env|cluster)\b",
+            r"\b(prod(?:uction)?|staging|uat|test(?:ing)?|dev(?:elopment)?|qa|env|cluster"
+            r"|product[s]?|line[s]?|customer[s]?|client[s]?|warehouse[s]?|name)\b",
             "", customer_hint, flags=re.I
         ).strip(" ,.")
         # Remove product name from customer hint if it slipped in

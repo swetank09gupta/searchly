@@ -116,9 +116,11 @@ class ChatHandler:
         resolution = self.resolver.resolve(c_hint, e_hint, question=message)
 
         if resolution.needs_input:
+            # No candidates means resolver showed the product menu → expect product reply
+            pending_kind = "new_customer_products" if not resolution.candidates else "customer_match"
             # Can't proceed — ask the user
             session.set_pending(
-                kind     = "customer_match",
+                kind     = pending_kind,
                 question = resolution.message,
                 options  = [c[0] for c in resolution.candidates],
                 context  = {
@@ -294,8 +296,10 @@ class ChatHandler:
             for p in valid_products:
                 name_part = name_part.replace(p, "").replace(p.replace("-", " "), "")
             name_part = name_part.strip(" ,.")
-            # Fall back to the original hint if no name part remains
-            if not name_part or len(name_part) < 3:
+            # Fall back to context hint if nothing meaningful remains
+            # (covers: reply was just product numbers like "1,2", "1 and 2", empty, or too short)
+            _selection_only = re.sub(r'\b(and|or)\b', '', name_part, flags=re.I).strip(' ,.')
+            if not name_part or len(name_part) < 3 or re.match(r'^[\d\s,./]+$', _selection_only):
                 name_part = ctx.get("customer_hint", "new-customer")
 
             cid = _slugify(name_part)
