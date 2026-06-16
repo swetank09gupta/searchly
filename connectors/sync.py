@@ -1202,12 +1202,18 @@ class JiraFetcher:
         r.raise_for_status()
         return [p["key"] for p in r.json()]
 
-    def fetch_issues(self, project: str) -> list:
+    def fetch_issues(self, project: str, since: int | None = None) -> list:
         # /rest/api/3/search was deprecated (returns 410 Gone).
         # /rest/api/3/search/jql uses cursor-based pagination via nextPageToken.
+        if since:
+            # 5-min buffer so items updated mid-crawl on the previous run aren't missed
+            dt = time.strftime("%Y-%m-%d %H:%M", time.gmtime(since - 300))
+            jql = f'project = "{project}" AND updated >= "{dt}" ORDER BY updated DESC'
+        else:
+            jql = f'project = "{project}" ORDER BY updated DESC'
         issues = []
         params: dict = {
-            "jql": f'project = "{project}" ORDER BY updated DESC',
+            "jql": jql,
             "maxResults": 100,
             "fields": "summary,description,status,assignee,priority,labels,"
                       "comment,issuetype,created,updated,fixVersions,components",
@@ -1233,7 +1239,8 @@ class JiraFetcher:
             if not next_token:
                 break
             params = {**params, "nextPageToken": next_token}
-        log.info("Jira %s: %d issues", project, len(issues))
+        mode = f"delta since {time.strftime('%Y-%m-%d %H:%M', time.gmtime(since))}" if since else "full"
+        log.info("Jira %s: %d issues (%s)", project, len(issues), mode)
         return issues
 
     def _to_doc(self, issue: dict) -> Optional[dict]:
@@ -1320,7 +1327,9 @@ class ConfluenceFetcher:
             if len(batch) < 50:
                 break
 
-    def fetch_pages(self, space: str) -> list:
+    def fetch_pages(self, space: str, since: int | None = None) -> list:
+        if since:
+            return self._fetch_pages_delta(space, since)
         pages, start = [], 0
         top_level_count = 0
         while True:
@@ -1349,6 +1358,37 @@ class ConfluenceFetcher:
         child_count = len(pages) - top_level_count
         log.info("Confluence %s: %d pages (including %d child pages)",
                  space, len(pages), child_count)
+        return pages
+
+    def _fetch_pages_delta(self, space: str, since: int) -> list:
+        """Fetch only pages modified since *since* (unix timestamp) using CQL search."""
+        # 5-min buffer so pages touched mid-crawl on the previous run aren't missed
+        dt = time.strftime("%Y-%m-%d %H:%M", time.gmtime(since - 300))
+        cql = f'space = "{space}" AND type = "page" AND lastModified >= "{dt}"'
+        pages, start = [], 0
+        while True:
+            r = _api_get(
+                f"{self.base}/wiki/rest/api/search", auth=self.auth,
+                params={"cql": cql,
+                        "expand": "body.storage,metadata.labels,history.lastUpdated",
+                        "start": start, "limit": 50},
+                timeout=30,
+            )
+            r.raise_for_status()
+            data = r.json()
+            batch = data.get("results", [])
+            if not batch:
+                break
+            for result in batch:
+                page = result.get("content") or result  # search wraps page in "content"
+                doc = self._to_doc(page, space)
+                if doc:
+                    pages.append(doc)
+            start += len(batch)
+            if len(batch) < 50 or start >= self.max:
+                break
+        log.info("Confluence %s: %d pages (delta since %s)", space, len(pages),
+                 time.strftime("%Y-%m-%d %H:%M", time.gmtime(since)))
         return pages
 
     def _to_doc(self, page: dict, space: str) -> Optional[dict]:
@@ -1470,26 +1510,20 @@ def main():
         if cfg.jira_url and cfg.jira_token:
             jira = JiraFetcher(cfg)
             projects = cfg.jira_projects or jira.list_projects()
-            full_interval_s = int(os.environ.get("SYNC_FULL_INTERVAL_HOURS", "4")) * 3600
-            skipped = []
             log.info("Syncing Jira: %s", projects)
             for proj in projects:
-                if not cfg.force:
-                    state = _load_sync_state()
-                    completed_at = state.get(f"jira_project_{proj}_completed_at")
-                    if completed_at and (time.time() - float(completed_at)) < full_interval_s:
-                        skipped.append(proj)
-                        continue
+                state = _load_sync_state()
+                since = None if cfg.force else state.get(f"jira_project_{proj}_completed_at")
+                since = int(since) if since else None
                 try:
-                    docs = [part for d in jira.fetch_issues(proj) for part in split_doc(d)]
+                    docs = [part for d in jira.fetch_issues(proj, since=since)
+                            for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
                     state = _load_sync_state()
                     state[f"jira_project_{proj}_completed_at"] = int(time.time())
                     _save_sync_state(state)
                 except Exception as e:
                     log.error("Jira %s: %s", proj, e)
-            if skipped:
-                log.info("Jira: skipped %d recently-synced projects: %s", len(skipped), skipped)
             poster.purge_stale("jira", sync_started_at)
         else:
             log.info("Jira not configured, skipping.")
@@ -1499,26 +1533,20 @@ def main():
         if cfg.confluence_url and cfg.confluence_token:
             conf = ConfluenceFetcher(cfg)
             spaces = cfg.confluence_spaces or conf.list_spaces()
-            full_interval_s = int(os.environ.get("SYNC_FULL_INTERVAL_HOURS", "4")) * 3600
-            skipped = []
             log.info("Syncing Confluence: %s", spaces)
             for space in spaces:
-                if not cfg.force:
-                    state = _load_sync_state()
-                    completed_at = state.get(f"confluence_space_{space}_completed_at")
-                    if completed_at and (time.time() - float(completed_at)) < full_interval_s:
-                        skipped.append(space)
-                        continue
+                state = _load_sync_state()
+                since = None if cfg.force else state.get(f"confluence_space_{space}_completed_at")
+                since = int(since) if since else None
                 try:
-                    docs = [part for d in conf.fetch_pages(space) for part in split_doc(d)]
+                    docs = [part for d in conf.fetch_pages(space, since=since)
+                            for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
                     state = _load_sync_state()
                     state[f"confluence_space_{space}_completed_at"] = int(time.time())
                     _save_sync_state(state)
                 except Exception as e:
                     log.error("Confluence %s: %s", space, e)
-            if skipped:
-                log.info("Confluence: skipped %d recently-synced spaces: %s", len(skipped), skipped)
             poster.purge_stale("confluence", sync_started_at)
         else:
             log.info("Confluence not configured, skipping.")
