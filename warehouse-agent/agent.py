@@ -181,12 +181,20 @@ async def run_agent(
         "searchly_tenant": searchly_tenant,
     }
 
-    # Phase 1: Planning — ask LLM what tools to call and in what order
-    tool_calls_to_run = await _plan_tools(
-        ollama_url, ollama_model, messages, tools_customer, customer_id,
-        searchly_url, searchly_tenant,
-        knowledge_only=(not operational),
-    )
+    # Phase 1: Planning — ask LLM what tools to call and in what order.
+    # For knowledge_only queries (no live cluster), search_knowledge is the only tool available,
+    # so skip the LLM planner and call it directly. llama3.2:3b is too small to reliably
+    # output structured JSON when it has a choice, but here there is no choice.
+    if not operational:
+        tool_calls_to_run = [{"function": {"name": "search_knowledge",
+                                           "arguments": {"query": question}}}]
+        log.info("knowledge_only: auto-calling search_knowledge")
+    else:
+        tool_calls_to_run = await _plan_tools(
+            ollama_url, ollama_model, messages, tools_customer, customer_id,
+            searchly_url, searchly_tenant,
+            knowledge_only=False,
+        )
 
     # Phase 2: Execution — run all planned tools
     for tc in tool_calls_to_run:
