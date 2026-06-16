@@ -299,6 +299,7 @@ public class RagService {
             String tenantId, Query combined) throws IOException {
         SearchRequest req = SearchRequest.of(s -> s
                 .index(chunkIndex).routing(tenantId).query(combined).size(CANDIDATE_K));
+        log.debug("runBm25: index={} routing={}", chunkIndex, tenantId);
         try {
             SearchResponse<Map> res = os.search(req, Map.class);
             List<KnnSearchClient.ChunkHit> hits = new ArrayList<>();
@@ -315,6 +316,9 @@ public class RagService {
             }
             return hits;
         } catch (org.opensearch.client.opensearch._types.OpenSearchException e) {
+            log.error("BM25 OpenSearch error on index={}: {}", chunkIndex, e.getMessage());
+            if (e.error() != null && e.error().causedBy() != null)
+                log.error("BM25 caused by: {}", e.error().causedBy().reason());
             if (e.getMessage() != null && e.getMessage().contains("index_not_found"))
                 return List.of();
             throw e;
