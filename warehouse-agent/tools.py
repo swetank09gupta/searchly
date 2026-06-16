@@ -308,7 +308,7 @@ async def search_knowledge(
     product:      str | None = None,
 ) -> dict[str, Any]:
     """Search Jira tickets, Confluence docs, and code via Searchly."""
-    params: dict[str, str] = {"q": query, "size": "5"}
+    params: dict[str, str] = {"q": query, "size": "5", "rag_only": "true"}
     if customer_id:
         params["customer"] = customer_id
     if product:

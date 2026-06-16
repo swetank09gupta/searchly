@@ -67,7 +67,7 @@ public class SearchService {
                                              List<String> facets,
                                              String customer, String product,
                                              String env, String sessionId,
-                                             String cursor) throws IOException {
+                                             String cursor, boolean ragOnly) throws IOException {
         TenantContext ctx = TenantContextHolder.require();
         String roleKey  = ctx.roles().stream().sorted().reduce((a, b) -> a + "," + b).orElse("");
         String facetKey = facets == null ? "" : String.join(",", facets);
@@ -190,7 +190,7 @@ public class SearchService {
         // --- leg 2: warehouse agent chat (with fuzzy resolution + live data) or static RAG ---
         RagService.RagResult ragResult;
         try {
-            ragResult = rag.answer(q, ctx, customer, product, env, sessionId);
+            ragResult = rag.answer(q, ctx, customer, product, env, sessionId, ragOnly);
         } catch (Exception e) {
             log.warn("RAG pipeline failed, returning keyword hits only: {}", e.getMessage());
             ragResult = new RagService.RagResult(null, List.of());

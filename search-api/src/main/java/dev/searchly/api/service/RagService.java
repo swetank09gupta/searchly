@@ -116,18 +116,18 @@ public class RagService {
     public RagResult answer(String question, TenantContext ctx,
                             String customer, String product, String env,
                             String sessionId) throws IOException {
+        return answer(question, ctx, customer, product, env, sessionId, false);
+    }
+
+    public RagResult answer(String question, TenantContext ctx,
+                            String customer, String product, String env,
+                            String sessionId, boolean ragOnly) throws IOException {
 
         // ── Primary path: warehouse agent chat (ALL queries when enabled) ────
-        // The agent handles everything:
-        //   - Fuzzy customer name resolution ("samsclub atl" → "sams-club-atlanta")
-        //   - Env extraction from the question ("in prod" → env=prod)
-        //   - Clarification dialog (unknown customer → auto-registers through chat)
-        //   - Live cluster data for configured envs
-        //   - Static RAG knowledge for solution-phase or no-cluster queries
-        //
-        // The agent replaces static RAG entirely when available.
-        // Fall back to static RAG below only if the agent service is down.
-        if (warehouseAgent.isEnabled()) {
+        // ragOnly=true skips this path — used when the warehouse agent itself calls
+        // search_knowledge to avoid an infinite routing loop:
+        //   agent → gateway → search-api → warehouseAgent.chat() → agent → ...
+        if (!ragOnly && warehouseAgent.isEnabled()) {
             try {
                 WarehouseAgentClient.AgentChatResult chat =
                         warehouseAgent.chat(question, sessionId, customer, env, product);
