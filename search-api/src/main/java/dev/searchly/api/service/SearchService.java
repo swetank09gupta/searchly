@@ -85,9 +85,23 @@ public class SearchService {
                         .query(v -> v.stringValue(q)).fuzziness("AUTO")))
                 : Query.of(b -> b.match(m -> m.field("content")
                         .query(v -> v.stringValue(q))));
-        // created_at is mapped as `long` (epoch millis) — Gauss decay with "now/d" origin only
-        // works on `date` type. Use plain BM25 until mapping is migrated to date type.
-        Query combined = Query.of(b -> b.bool(bool -> bool.must(textQuery).filter(tenantFilter)));
+        // created_at is mapped as `long` (epoch millis), not `date`. For long fields, Gauss
+        // decay requires a numeric origin (current epoch ms) and scale in the same unit (ms).
+        long nowMs    = System.currentTimeMillis();
+        long scale30d = 30L * 24 * 60 * 60 * 1000;   // 30 days in milliseconds
+        Query boolQuery = Query.of(b -> b.bool(bool -> bool.must(textQuery).filter(tenantFilter)));
+        Query combined = Query.of(b -> b.functionScore(fs -> fs
+                .query(boolQuery)
+                .functions(java.util.List.of(
+                    org.opensearch.client.opensearch._types.query_dsl.FunctionScore.of(f -> f
+                        .gauss(g -> g
+                            .field("created_at")
+                            .placement(org.opensearch.client.opensearch._types.query_dsl.DecayPlacement.of(d -> d
+                                .origin(org.opensearch.client.json.JsonData.of(nowMs))
+                                .scale(org.opensearch.client.json.JsonData.of(scale30d))
+                                .decay(0.5)))))))
+                .boostMode(org.opensearch.client.opensearch._types.query_dsl.FunctionBoostMode.Multiply)
+                .scoreMode(org.opensearch.client.opensearch._types.query_dsl.FunctionScoreMode.Sum)));
 
         Map<String, Aggregation> aggs = new LinkedHashMap<>();
         if (facets != null) {
