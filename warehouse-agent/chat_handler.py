@@ -42,7 +42,7 @@ from typing import Any
 
 import httpx
 
-from agent import run_agent
+from agent import run_agent, _is_operational
 from customer_registry import CustomerRegistry, LIFECYCLE_ORDER, lifecycle_label
 from entity_extractor import extract_entities
 from products_config import product_menu, parse_selection, validate_products, ids as product_ids
@@ -116,6 +116,37 @@ class ChatHandler:
         resolution = self.resolver.resolve(c_hint, e_hint, question=message)
 
         if resolution.needs_input:
+            # If no customer hint was given and the question doesn't need live cluster data,
+            # treat it as a general knowledge query (new dev onboarding, SA demo, etc.)
+            # and answer straight from the knowledge base — no clarification needed.
+            if not c_hint and not _is_operational(message):
+                agent_result = await run_agent(
+                    question        = message,
+                    customer_id     = None,
+                    customer_record = None,
+                    env_config      = None,
+                    product         = p_hint,
+                    ollama_url      = self.ollama_url,
+                    ollama_model    = self.ollama_model,
+                    searchly_url    = self.searchly_url,
+                    searchly_tenant = self.searchly_tenant,
+                )
+                answer = agent_result["answer"]
+                session.add_turn("agent", answer)
+                return {
+                    "session_id":          session.id,
+                    "answer":              answer,
+                    "resolved_customer":   None,
+                    "resolved_env":        None,
+                    "lifecycle_stage":     None,
+                    "lifecycle_label":     None,
+                    "has_live_data":       False,
+                    "needs_clarification": False,
+                    "tools_called":        agent_result["tools_called"],
+                    "tool_results":        agent_result["tool_results"],
+                    "is_operational":      False,
+                }
+
             # No candidates means resolver showed the product menu → expect product reply
             pending_kind = "new_customer_products" if not resolution.candidates else "customer_match"
             # Can't proceed — ask the user
