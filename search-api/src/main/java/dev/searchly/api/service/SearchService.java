@@ -7,12 +7,6 @@ import org.opensearch.client.opensearch.OpenSearchClient;
 import org.opensearch.client.opensearch._types.SortOptions;
 import org.opensearch.client.opensearch._types.SortOrder;
 import org.opensearch.client.opensearch._types.aggregations.Aggregation;
-import org.opensearch.client.json.JsonData;
-import org.opensearch.client.opensearch._types.query_dsl.DecayFunction;
-import org.opensearch.client.opensearch._types.query_dsl.DecayPlacement;
-import org.opensearch.client.opensearch._types.query_dsl.FunctionBoostMode;
-import org.opensearch.client.opensearch._types.query_dsl.FunctionScore;
-import org.opensearch.client.opensearch._types.query_dsl.FunctionScoreMode;
 import org.opensearch.client.opensearch._types.query_dsl.Query;
 import org.opensearch.client.opensearch.core.SearchRequest;
 import org.opensearch.client.opensearch.core.SearchResponse;
@@ -91,20 +85,9 @@ public class SearchService {
                         .query(v -> v.stringValue(q)).fuzziness("AUTO")))
                 : Query.of(b -> b.match(m -> m.field("content")
                         .query(v -> v.stringValue(q))));
-        Query boolQuery = Query.of(b -> b.bool(bool -> bool.must(textQuery).filter(tenantFilter)));
-
-        // Recency boost: Gauss decay on created_at — docs newer than 30 days score up to 20% higher
-        Query combined = Query.of(b -> b.functionScore(fs -> fs
-                .query(boolQuery)
-                .functions(List.of(FunctionScore.of(f -> f
-                        .gauss(g -> g
-                                .field("created_at")
-                                .placement(DecayPlacement.of(d -> d
-                                        .origin(JsonData.of("now/d"))
-                                        .scale(JsonData.of("30d"))
-                                        .decay(0.5)))))))
-                .boostMode(FunctionBoostMode.Multiply)
-                .scoreMode(FunctionScoreMode.Sum)));
+        // created_at is mapped as `long` (epoch millis) — Gauss decay with "now/d" origin only
+        // works on `date` type. Use plain BM25 until mapping is migrated to date type.
+        Query combined = Query.of(b -> b.bool(bool -> bool.must(textQuery).filter(tenantFilter)));
 
         Map<String, Aggregation> aggs = new LinkedHashMap<>();
         if (facets != null) {
