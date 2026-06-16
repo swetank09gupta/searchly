@@ -94,8 +94,8 @@ FastAPI application. Entry point: `main.py`. All endpoints are under `/api/v1/ag
 | `tools.py` | Live tools: `get_logs()`, `get_pod_status()`, `get_deployment_state()`, `list_log_indices()`, `search_knowledge()` |
 | `elastic_logs.py` | ES log queries — Mode A (bastion-kubectl) and Mode B (direct HTTP) |
 | `customer_registry.py` | Thread-safe, file-backed lifecycle-aware customer/environment registry |
-| `entity_extractor.py` | Regex-based entity extraction: env, service, customer, intent |
-| `resolver.py` | Fuzzy match → RESOLVED / NEEDS_CONFIRM; unknown customer → offers to register |
+| `entity_extractor.py` | LLM-first entity extraction (Ollama, 20s timeout) with regex fallback: env, service, customer hint, intent |
+| `resolver.py` | Customer resolution via window scan: slides 1–4 word windows over the full question, scores each phrase against all registered customers, takes max(hint_score, scan_score). Any phrasing resolves. Matched phrases learned as aliases. |
 | `session.py` | In-memory conversation session store with TTL expiry (horizontal scaling gap — see §8) |
 | `eval_scheduler.py` | APScheduler nightly eval at 02:00 UTC; writes to `eval_history/`; detects >10% metric regression |
 | `auth.py` | API key authentication middleware |
@@ -117,6 +117,9 @@ Query
   ├─ 3. Planner (Ollama call 1 of N)
   │       └─ produces an ordered tool execution plan (plan → execute → synthesise)
   │           replaces the old reactive N-round loop
+  │           SHORTCUT: when no live cluster is configured (knowledge-only mode),
+  │           the LLM planner is bypassed and search_knowledge is called directly;
+  │           llama3.2:3b is too small to reliably emit JSON tool arrays
   │
   ├─ 4. Query rewriting (Ollama, ~600ms)
   │       └─ alternative phrasing of the query for dual-query retrieval
@@ -400,5 +403,6 @@ The current design is single-node CPU-only to enable zero-cost self-hosting.
 1. **ACL fields not enforced** — `acl_users`/`acl_roles` stored in OpenSearch but never applied as filters (Sprint 2.1).
 2. **Knowledge graph is empty** — KG storage layer exists (`kg_entities`, `kg_relationships`) but `connectors/sync.py` was not updated. Jira remote links wiring is Sprint 2.2.
 3. **Retrieval legs sequential** — 6 HTTP calls run in series; ~300ms recoverable (Sprint 1.1).
-4. **Sessions in-memory** — warehouse-agent cannot scale horizontally (Sprint 1.3).
-5. **No production query log** — eval dataset has 5 sample questions; no feedback loop from real queries (Sprint 4.1).
+4. **Chunk BM25 recency boost missing** — `RagService.bm25Internal()` uses plain match; `SearchService` documents-* BM25 has Gauss decay (numeric epoch origin). Same fix needed for chunks (Sprint 1.2). Use `System.currentTimeMillis()` as origin, NOT `now/d` — `created_at` is `long`, not `date`.
+5. **Sessions in-memory** — warehouse-agent cannot scale horizontally (Sprint 1.3).
+6. **No production query log** — eval dataset has 5 sample questions; no feedback loop from real queries (Sprint 4.1).

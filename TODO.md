@@ -15,8 +15,8 @@ These three are independent, can be done in parallel, and require no schema chan
 
 ### S1.2 — Recency Boost on Chunk BM25  `search-api/RagService.java`
 **Why:** `SearchService` applies Gauss decay to `documents-*` BM25. `RagService.bm25Internal()` uses plain `match` — a 3-year-old Confluence page competes equally with yesterday's deployment log.  
-**Fix:** Add `function_score` wrapper to `bm25Internal()` identical to what's in `SearchService` (origin=now/d, scale=30d, decay=0.5).  
-**Files:** `RagService.bm25Internal()` — 15-line change.
+**Fix:** Add `function_score` wrapper to `bm25Internal()` matching the pattern in `SearchService`. **Important:** `created_at` is mapped as `long` (epoch millis), NOT `date`. Use numeric epoch origin (`System.currentTimeMillis()`) and numeric scale (`30L * 24 * 60 * 60 * 1000` ms). Do NOT use `"now/d"` date-math — it only works on `date` type fields and will produce "all shards failed".  
+**Files:** `RagService.bm25Internal()` — 15-line change, pattern identical to `SearchService` lines 90–104.
 
 ### S1.3 — Redis Session Store for Warehouse Agent  `warehouse-agent/session.py`
 **Why:** `SessionStore` is an in-memory dict. Horizontal scaling of warehouse-agent is architecturally impossible.  
@@ -96,7 +96,7 @@ These three are independent, can be done in parallel, and require no schema chan
 
 ---
 
-## Done (P0–P3, 2026-06-16)
+## Done (P0–P3 + session fixes, 2026-06-16)
 - [x] Cursor-based pagination (search_after)
 - [x] GDPR delete pipeline
 - [x] Redis sliding-window rate limiting
@@ -107,7 +107,7 @@ These three are independent, can be done in parallel, and require no schema chan
 - [x] Dual-query retrieval (6 legs, RRF with authority weights)
 - [x] Source budget context selection
 - [x] Metadata-aware retrieval (env/service extraction)
-- [x] Recency boost on documents-* BM25
+- [x] Recency boost on documents-* BM25 (Gauss decay, numeric epoch origin — `created_at` is `long` not `date`)
 - [x] Resilience4j circuit breakers (5 instances)
 - [x] Planner agent loop (plan → execute → synthesize)
 - [x] Rolling session memory compression with structured_memory
@@ -116,3 +116,7 @@ These three are independent, can be done in parallel, and require no schema chan
 - [x] Retrieval tracing (RetrievalTrace per chunk in SearchResponse)
 - [x] Embedding version lineage (embedding_version on every chunk)
 - [x] Nightly eval scheduler (APScheduler, regression detection)
+- [x] `rag_only=true` flag — breaks circular routing loop (search_knowledge → gateway → RagService → warehouseAgent → ∞)
+- [x] HTTP/1.1 forced on all 5 Java HTTP clients (EmbeddingClient, WarehouseAgentClient, RerankClient, KnnSearchClient, OllamaClient) — Java 11 defaults to HTTP/2 but FastAPI/uvicorn and Ollama only support HTTP/1.1
+- [x] Knowledge-only planner bypass — `llama3.2:3b` unreliable for JSON tool arrays; search_knowledge auto-called when no live cluster configured
+- [x] Window-scan entity resolution in `resolver.py` — 1–4 word sliding window over full question; any phrasing resolves customer regardless of sentence structure or prepositions

@@ -56,7 +56,7 @@ User Query
 
 **Query**: typed OpenSearch Java DSL; `match(content, q)` + `term(tenant_id)` + optional `term(metadata.env)` / `term(metadata.service)` filters.
 
-**BM25**: OpenSearch defaults (k1=1.2, b=0.75). Recency boost (Gauss decay, 30d/0.5) applied to `documents-*` BM25 only — **not yet applied to chunk retrieval**.
+**BM25**: OpenSearch defaults (k1=1.2, b=0.75). Recency boost (Gauss decay, 30d scale, 0.5 decay) applied to `documents-*` BM25. Origin is `System.currentTimeMillis()` (numeric epoch ms) because `created_at` is mapped as `long`, not `date` — date-math (`now/d`) fails on `long` fields. **Not yet applied to chunk retrieval (RagService.bm25Internal)** — still a gap.
 
 **Highlighting**: `content` field, 150 chars/fragment, 2 fragments/hit.
 
@@ -86,7 +86,7 @@ User Query
 ---
 
 ## OpenSearch Mappings
-**documents-***: `tenant_id` (keyword), `title` (text), `content` (text), `metadata` (object), `created_at` (date), `content_fingerprint` (keyword). 3 shards, 0 replicas (dev).
+**documents-***: `tenant_id` (keyword), `title` (text), `content` (text), `metadata` (object), `created_at` (**long — epoch millis**, NOT `date`), `content_fingerprint` (keyword). 3 shards, 0 replicas (dev). The `long` mapping for `created_at` means Gauss decay must use numeric epoch origin, not date-math strings.
 
 **chunks-***: above fields + `chunk_text` (text), `chunk_index` (integer), `embedding` (knn_vector, dim=384, HNSW M=16 ef=128, Lucene engine), `embedding_version` (keyword). `knn: true`.
 
@@ -137,9 +137,11 @@ Every `SearchResponse` includes `retrieval_traces: List<RetrievalTrace>` for the
 - **LLM**: Ollama `llama3.2:3b` (self-hosted, no data egress, 120s timeout)
 - **RAG context**: system prompt + top-6 chunks + customer header; max 5 agentic tool rounds
 - **Warehouse Agent tools**: `search_knowledge`, `get_logs`, `get_deployment_state`, `get_pod_status`, `list_log_indices`
-- **Agent loop**: Planner (JSON tool plan) → Execution (parallel tool calls) → Synthesis
+- **Agent loop**: Planner (JSON tool plan) → Execution (parallel tool calls) → Synthesis. **Knowledge-only shortcut**: when no live cluster is configured (`operational=False`), the LLM planner is bypassed and `search_knowledge` is called directly — `llama3.2:3b` is too small to reliably emit JSON tool arrays under open-ended choice.
+- **`rag_only` flag**: `search_knowledge` sends `rag_only=true` to the gateway. `RagService` skips the warehouse-agent path when this is set, breaking the circular routing loop (search_knowledge → gateway → RagService → warehouseAgent → search_knowledge → ∞).
 - **Session memory**: rolling summary + structured_memory {customer, environment, active_issue, investigation_state, known_findings}; 5 verbatim recent turns kept
 - **Credential access (Mode A)**: fetches ES password at runtime from k8s Secret, execs in filebeat pod — zero stored credentials
+- **Entity resolution**: `resolver.py` slides a 1–4 word window over the full question and scores each phrase against the customer registry (max of hint-score and scan-score). Any phrasing resolves — "solution numbers for sodimac colombia", "GMI's prod cluster", etc. — without depending on the entity extractor correctly isolating the customer substring. Matched phrase is learned as an alias for instant future resolution.
 
 ---
 
@@ -160,7 +162,7 @@ Every `SearchResponse` includes `retrieval_traces: List<RetrievalTrace>` for the
 ### Correctness (High)
 - KG extraction not wired — graph empty, wire Jira remote links first
 - Retrieval legs sequential — use `CompletableFuture.allOf()`, ~250ms free
-- Recency boost missing from chunk BM25 — add `function_score` to `bm25Internal`
+- Recency boost missing from chunk BM25 — add `function_score` to `RagService.bm25Internal()`. Use numeric epoch origin (`System.currentTimeMillis()`) and scale in ms — NOT date-math `now/d`, which requires `date` type but `created_at` is `long`.
 
 ### Reliability (Medium)
 - Sessions in-memory — move `SessionStore` to Redis (30-line change)
