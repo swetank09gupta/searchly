@@ -422,7 +422,7 @@ class Config:
 
     batch_size: int = 5
     atlassian_workers: int = 3   # parallel Jira projects / Confluence spaces
-    github_workers: int = 4      # parallel GitHub repo indexing + KG
+    github_workers: int = 1      # parallel GitHub repo indexing + KG (keep 1 to avoid OOM on clone)
     jira_max_results: int = 1000
     confluence_max_results: int = 500
     git_max_file_kb: int = 500
@@ -464,7 +464,7 @@ def load_config(args) -> Config:
 
         batch_size=int(opt("SYNC_BATCH_SIZE", "5")),
         atlassian_workers=int(opt("SYNC_ATLASSIAN_WORKERS", "3")),
-        github_workers=int(opt("SYNC_GITHUB_WORKERS", "4")),
+        github_workers=int(opt("SYNC_GITHUB_WORKERS", "1")),
         jira_max_results=int(opt("JIRA_MAX_RESULTS", "1000")),
         confluence_max_results=int(opt("CONFLUENCE_MAX_RESULTS", "500")),
         git_max_file_kb=int(opt("GIT_MAX_FILE_KB", "500")),
@@ -1113,14 +1113,29 @@ class RepoIndexer:
             remote_sha = None
 
         # ── Clone ──────────────────────────────────────────────────────────
+        def _rss() -> int:
+            try:
+                return int(Path("/proc/self/status").read_text().split("VmRSS:")[1].split()[0]) // 1024
+            except Exception:
+                return 0
+
         with tempfile.TemporaryDirectory() as tmp:
-            clone_cmd = ["git", "clone", "--depth=1"]
+            clone_cmd = ["git", "clone", "--depth=1", "--single-branch"]
             if branch:
                 clone_cmd += ["--branch", branch]
             clone_cmd += [auth_url, tmp]
 
-            log.info("Cloning %s ...", label)
-            result = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=180)
+            rss_before = _rss()
+            log.info("Cloning %s ... (RSS=%dMB)", label, rss_before)
+            result = subprocess.run(
+                clone_cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=180,
+            )
+            rss_after_clone = _rss()
+            log.info("  %s: clone done RSS=%dMB (+%dMB)", label, rss_after_clone, rss_after_clone - rss_before)
             if result.returncode != 0:
                 log.error("Clone failed for %s: %s", label, result.stderr[:200])
                 return [], None, state_key
@@ -1133,12 +1148,11 @@ class RepoIndexer:
             actual_sha = head_result.stdout.strip() if head_result.returncode == 0 else remote_sha
 
             docs = self._walk(tmp, repo_name, product, exts=exts, branch=branch)
-            try:
-                rss = int(Path("/proc/self/status").read_text().split("VmRSS:")[1].split()[0]) // 1024
-            except Exception:
-                rss = 0
+            rss_after_walk = _rss()
+            log.info("  %s: walk done %d chunks RSS=%dMB (+%dMB)", label, len(docs), rss_after_walk, rss_after_walk - rss_after_clone)
 
-        log.info("  %s: %d chunks (%s) RSS=%dMB", label, len(docs), (actual_sha or "")[:8], rss)
+        rss_final = _rss()
+        log.info("  %s: %d chunks (%s) RSS=%dMB (total +%dMB)", label, len(docs), (actual_sha or "")[:8], rss_final, rss_final - rss_before)
         return docs, actual_sha, state_key
 
     def sync_kg_for_repo(self, repo_name: str, org: str, kg: "KgPoster",
