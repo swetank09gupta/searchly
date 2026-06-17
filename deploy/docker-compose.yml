@@ -262,7 +262,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 3g
+          memory: 6g
     depends_on:
       search-api: { condition: service_started }
     restart: unless-stopped

@@ -1133,8 +1133,12 @@ class RepoIndexer:
             actual_sha = head_result.stdout.strip() if head_result.returncode == 0 else remote_sha
 
             docs = self._walk(tmp, repo_name, product, exts=exts, branch=branch)
+            try:
+                rss = int(Path("/proc/self/status").read_text().split("VmRSS:")[1].split()[0]) // 1024
+            except Exception:
+                rss = 0
 
-        log.info("  %s: %d chunks (%s)", label, len(docs), (actual_sha or "")[:8])
+        log.info("  %s: %d chunks (%s) RSS=%dMB", label, len(docs), (actual_sha or "")[:8], rss)
         return docs, actual_sha, state_key
 
     def sync_kg_for_repo(self, repo_name: str, org: str, kg: "KgPoster",
@@ -2099,6 +2103,12 @@ def main():
             log.error(msg)
             shared_errors.append(msg)
 
+    def _rss_mb() -> int:
+        try:
+            return int(Path("/proc/self/status").read_text().split("VmRSS:")[1].split()[0]) // 1024
+        except Exception:
+            return 0
+
     def _run_repos() -> None:
         if not (only is None or only in ("shared", "repos")):
             return
@@ -2106,9 +2116,11 @@ def main():
             log.info("products.yml not loaded, skipping repos.")
             return
         try:
-            log.info("Indexing repos from products.yml (adaptive, max=%d) ...", cfg.github_workers)
+            log.info("Indexing repos from products.yml (adaptive, max=%d) ... RSS=%dMB",
+                     cfg.github_workers, _rss_mb())
             repo_indexer = RepoIndexer(cfg, products_cfg)
             repo_indexer.index_all_products(poster, workers=cfg.github_workers)
+            log.info("Repos indexed. RSS=%dMB", _rss_mb())
             poster.purge_stale("git", sync_started_at)
 
             org = products_cfg.get("github_org", "")
