@@ -265,9 +265,11 @@ services:
     deploy:
       resources:
         limits:
-          # 30g: large repos (e.g. greymatter-deployment) fill ~25 GB page cache per walk.
-          # Page cache is evictable but Docker cgroup counts it; 8g would OOM.
-          memory: 30g
+          # 20g cap: large repos fill ~25 GB page cache per walk (git clone + file reads).
+          # 20g forces kernel to evict oldest pages within the cgroup rather than
+          # growing unboundedly and starving the 37 GB VM. 8g was too low (OOM on
+          # any large repo); 30g was too high (left < 7 GB for all other containers).
+          memory: 20g
     depends_on:
       search-api: { condition: service_started }
     restart: unless-stopped
