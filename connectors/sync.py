@@ -1021,6 +1021,12 @@ class RepoIndexer:
                 _update_state(state_key, new_sha)
             if docs:
                 poster.post_batch(docs, workers=self.cfg.batch_size)
+            del docs
+            import gc; gc.collect()
+            try:
+                import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
 
             # Index every non-noise branch + auto-register customers
             branches = self._list_all_branches(auth_url)
@@ -1041,6 +1047,10 @@ class RepoIndexer:
                     poster.post_batch(docs, workers=self.cfg.batch_size)
                 del docs
                 import gc; gc.collect()
+                try:
+                    import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception:
+                    pass
 
     def _register_customer_env(self, agent_url: str, customer_id: str, env: str):
         """
