@@ -901,6 +901,13 @@ class RepoIndexer:
 
         # ── Step 4: DevOps / deployment repos ────────────────────────────────────
         if self.cfg.devops_repos:
+            import gc
+            gc.collect()
+            try:
+                rss_s4 = int(Path("/proc/self/status").read_text().split("VmRSS:")[1].split()[0]) // 1024
+            except Exception:
+                rss_s4 = 0
+            log.info("Step 4 start: RSS=%dMB", rss_s4)
             log.info("Syncing %d DevOps repos: %s", len(self.cfg.devops_repos),
                      self.cfg.devops_repos)
             # DevOps repos update state internally via _update_state
@@ -1032,6 +1039,8 @@ class RepoIndexer:
                     _update_state(state_key, new_sha)
                 if docs:
                     poster.post_batch(docs, workers=self.cfg.batch_size)
+                del docs
+                import gc; gc.collect()
 
     def _register_customer_env(self, agent_url: str, customer_id: str, env: str):
         """
@@ -2062,6 +2071,7 @@ def main():
             log.info("Syncing Jira: %s (adaptive, max=%d)", projects, cfg.atlassian_workers)
 
             def _sync_jira_project(proj: str) -> None:
+                import gc
                 state = _load_sync_state()
                 since = None if cfg.force else state.get(f"jira_project_{proj}_completed_at")
                 since = int(since) if since else None
@@ -2071,6 +2081,8 @@ def main():
                     docs = [part for d in jira.fetch_issues(proj, since=since)
                             for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
+                    del docs
+                    gc.collect()
                     jira.sync_kg_for_project(proj, kg, since=kg_since)
                     now = int(time.time())
                     _update_state(f"jira_project_{proj}_completed_at", now)
@@ -2098,6 +2110,7 @@ def main():
             log.info("Syncing Confluence: %s (adaptive, max=%d)", spaces, cfg.atlassian_workers)
 
             def _sync_confluence_space(space: str) -> None:
+                import gc
                 state = _load_sync_state()
                 since = None if cfg.force else state.get(f"confluence_space_{space}_completed_at")
                 since = int(since) if since else None
@@ -2105,6 +2118,8 @@ def main():
                     docs = [part for d in conf.fetch_pages(space, since=since)
                             for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
+                    del docs
+                    gc.collect()
                     _update_state(f"confluence_space_{space}_completed_at", int(time.time()))
                 except Exception as e:
                     log.error("Confluence %s: %s", space, e)
