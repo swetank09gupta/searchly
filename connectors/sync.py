@@ -1296,7 +1296,13 @@ class RepoIndexer:
             if path.stat().st_size > self.max_file_kb * 1024:
                 continue
             try:
-                text = path.read_text(encoding="utf-8", errors="replace")
+                with open(path, encoding="utf-8", errors="replace") as _f:
+                    text = _f.read()
+                    try:
+                        import os as _os
+                        _os.posix_fadvise(_f.fileno(), 0, 0, _os.POSIX_FADV_DONTNEED)
+                    except (AttributeError, OSError):
+                        pass
                 rel = str(path.relative_to(root_path))
                 dt = self._doc_type(rel)
                 if dt:
