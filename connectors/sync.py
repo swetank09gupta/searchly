@@ -877,32 +877,21 @@ class RepoIndexer:
             clone_url = self._resolve_url(repo_name)
             auth_url  = self._auth_url(clone_url)
 
-            docs, new_sha, state_key = self._index_repo(
-                clone_url, repo_name, product_name, exts=exts, branch=None
+            new_sha, state_key = self._index_repo(
+                clone_url, repo_name, product_name, exts=exts, branch=None,
+                poster=poster
             )
             if new_sha:
                 _update_state(state_key, new_sha)
-            if docs:
-                poster.post_batch(docs, workers=self.cfg.batch_size)
-            del docs
-            import gc; gc.collect()
-            try:
-                import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception:
-                pass
 
             _GITHUB_RL.wait()
             for branch_name, _ in self._resolve_branches(auth_url, branch_patterns):
-                docs, new_sha, state_key = self._index_repo(
+                new_sha, state_key = self._index_repo(
                     clone_url, repo_name, product_name,
-                    exts=exts, branch=branch_name
+                    exts=exts, branch=branch_name, poster=poster
                 )
                 if new_sha:
                     _update_state(state_key, new_sha)
-                if docs:
-                    poster.post_batch(docs, workers=self.cfg.batch_size)
-                del docs
-                import gc; gc.collect()
                 try:
                     import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
                 except Exception:
@@ -1026,19 +1015,12 @@ class RepoIndexer:
             auth_url  = self._auth_url(clone_url)
 
             # Always index the default branch
-            docs, new_sha, state_key = self._index_repo(
-                clone_url, repo_name, "devops", exts=self.include_exts, branch=None
+            new_sha, state_key = self._index_repo(
+                clone_url, repo_name, "devops", exts=self.include_exts, branch=None,
+                poster=poster
             )
             if new_sha:
                 _update_state(state_key, new_sha)
-            if docs:
-                poster.post_batch(docs, workers=self.cfg.batch_size)
-            del docs
-            import gc; gc.collect()
-            try:
-                import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
-            except Exception:
-                pass
 
             # Index every non-noise branch + auto-register customers
             branches = self._list_all_branches(auth_url)
@@ -1049,20 +1031,12 @@ class RepoIndexer:
                     customer_id, env = parsed
                     self._register_customer_env(agent_url, customer_id, env)
 
-                docs, new_sha, state_key = self._index_repo(
+                new_sha, state_key = self._index_repo(
                     clone_url, repo_name, "devops",
-                    exts=self.include_exts, branch=branch_name
+                    exts=self.include_exts, branch=branch_name, poster=poster
                 )
                 if new_sha:
                     _update_state(state_key, new_sha)
-                if docs:
-                    poster.post_batch(docs, workers=self.cfg.batch_size)
-                del docs
-                import gc; gc.collect()
-                try:
-                    import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
-                except Exception:
-                    pass
 
     def _register_customer_env(self, agent_url: str, customer_id: str, env: str):
         """
@@ -1118,14 +1092,18 @@ class RepoIndexer:
 
     def _index_repo(self, clone_url: str, repo_name: str, product: str,
                     exts: set | None = None,
-                    branch: str | None = None) -> tuple[list, str | None, str]:
+                    branch: str | None = None,
+                    poster=None) -> tuple[str | None, str]:
         """
-        Clone a repo (or a specific branch), walk files, return
-        (docs, new_sha, state_key).
+        Clone a repo (or a specific branch), stream-walk files, post in batches.
 
         state_key is  "repo_name"         for the default branch
                       "repo_name:branch"  for named branches
-        Returns ([], None, state_key) when the branch is unchanged or clone fails.
+        Returns (None, state_key) when the branch is unchanged or clone fails,
+        (actual_sha, state_key) on success.
+
+        Docs are streamed in batches of 50 directly to `poster` so peak memory
+        is one batch (~100 KB), not the entire repo walk (~8 GB for large repos).
         """
         if exts is None:
             exts = self.include_exts
@@ -1139,7 +1117,7 @@ class RepoIndexer:
             remote_sha = self._remote_sha(auth_url, branch)
             if remote_sha and self._sync_state.get(state_key) == remote_sha:
                 log.info("  %s: unchanged (%s), skipping", label, remote_sha[:8])
-                return [], None, state_key
+                return None, state_key
         else:
             remote_sha = None
 
@@ -1169,7 +1147,7 @@ class RepoIndexer:
             log.info("  %s: clone done RSS=%dMB (+%dMB)", label, rss_after_clone, rss_after_clone - rss_before)
             if result.returncode != 0:
                 log.error("Clone failed for %s: %s", label, result.stderr[:200])
-                return [], None, state_key
+                return None, state_key
 
             # Actual SHA after clone (more reliable than ls-remote for default branch)
             head_result = subprocess.run(
@@ -1178,13 +1156,29 @@ class RepoIndexer:
             )
             actual_sha = head_result.stdout.strip() if head_result.returncode == 0 else remote_sha
 
-            docs = self._walk(tmp, repo_name, product, exts=exts, branch=branch)
-            rss_after_walk = _rss()
-            log.info("  %s: walk done %d chunks RSS=%dMB (+%dMB)", label, len(docs), rss_after_walk, rss_after_walk - rss_after_clone)
+            # Stream walk: post in batches of 50 so peak memory = one batch, not full repo
+            total = 0
+            batch: list = []
+            for doc in self._walk(tmp, repo_name, product, exts=exts, branch=branch):
+                batch.append(doc)
+                if len(batch) >= 50 and poster:
+                    poster.post_batch(batch, workers=self.cfg.batch_size)
+                    batch.clear()
+                total += 1
+            if batch and poster:
+                poster.post_batch(batch, workers=self.cfg.batch_size)
+                batch.clear()
 
+            rss_after_walk = _rss()
+            log.info("  %s: walk done %d chunks RSS=%dMB (+%dMB)", label, total, rss_after_walk, rss_after_walk - rss_after_clone)
+
+        try:
+            import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:
+            pass
         rss_final = _rss()
-        log.info("  %s: %d chunks (%s) RSS=%dMB (total +%dMB)", label, len(docs), (actual_sha or "")[:8], rss_final, rss_final - rss_before)
-        return docs, actual_sha, state_key
+        log.info("  %s: %d chunks (%s) RSS=%dMB (total +%dMB)", label, total, (actual_sha or "")[:8], rss_final, rss_final - rss_before)
+        return actual_sha, state_key
 
     def sync_kg_for_repo(self, repo_name: str, org: str, kg: "KgPoster",
                          max_prs: int = 200, since: str | None = None) -> int:
@@ -1286,8 +1280,8 @@ class RepoIndexer:
         return url
 
     def _walk(self, root: str, repo_name: str, product: str,
-              exts: set | None = None, branch: str | None = None) -> list:
-        docs = []
+              exts: set | None = None, branch: str | None = None):
+        """Generator: yields one doc dict at a time to avoid building a large in-memory list."""
         root_path = Path(root)
         skip_dirs = {".git", "__pycache__", "node_modules", ".gradle", "target",
                      "build", "dist", ".idea", ".vscode", "venv"}
@@ -1331,15 +1325,14 @@ class RepoIndexer:
                     if dt:
                         meta["doc_type"] = dt
                     branch_label = f"@{branch}" if branch else ""
-                    docs.append({
+                    yield {
                         "title": f"[{product}/{repo_name}{branch_label}] {rel}"
                                  + (f" (part {i+1})" if len(chunks) > 1 else ""),
                         "content": chunk,
                         "metadata": meta,
-                    })
+                    }
             except Exception as e:
                 log.debug("Skip %s: %s", path, e)
-        return docs
 
     def _chunk_code(self, text: str, ext: str) -> list:
         if ext == ".py":
