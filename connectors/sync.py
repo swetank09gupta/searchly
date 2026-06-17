@@ -884,6 +884,12 @@ class RepoIndexer:
                 _update_state(state_key, new_sha)
             if docs:
                 poster.post_batch(docs, workers=self.cfg.batch_size)
+            del docs
+            import gc; gc.collect()
+            try:
+                import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
 
             _GITHUB_RL.wait()
             for branch_name, _ in self._resolve_branches(auth_url, branch_patterns):
@@ -895,6 +901,12 @@ class RepoIndexer:
                     _update_state(state_key, new_sha)
                 if docs:
                     poster.post_batch(docs, workers=self.cfg.batch_size)
+                del docs
+                import gc; gc.collect()
+                try:
+                    import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception:
+                    pass
 
         _AdaptivePool("git", max_workers=workers).map(
             _index_one_repo, sorted(work.items()))
