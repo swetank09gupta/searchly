@@ -167,7 +167,7 @@ Every `SearchResponse` includes `retrieval_traces: List<RetrievalTrace>` for the
 ### Reliability (Medium)
 - Sessions in-memory — move `SessionStore` to Redis (30-line change)
 - Redis failure → 429 — catch `RedisException`, degrade to allow-through
-- `Kafka max.poll.records` unbounded — set to 10, add concurrency semaphore
+- `Kafka max.poll.records` set to 10 in `indexer/src/main/resources/application.yml` — prevents OOM burst from parallel sync filling Kafka faster
 
 ### Long-Term
 - Embedding version migration path (versioned index aliases)
@@ -201,11 +201,11 @@ Roles are JWT claims, enforced via Spring `@PreAuthorize` + `TenantSecurityFilte
 ---
 
 ## Connectors
-- **Jira**: JQL cursor pagination, 150ms pacing, max 1000 issues/project. **Delta sync**: second run onwards adds `AND updated >= last_completed_at` to JQL — only changed issues fetched. First run: full fetch.
-- **Confluence**: recursive page fetch (depth ≤8), HTML stripped. **Delta sync**: second run onwards uses CQL search API (`lastModified >= last_completed_at`) — flat result, no recursive walk needed. First run: full recursive fetch.
-- **GitHub**: language-aware chunking (Python=AST, Java=regex, fallback=2000-char text); ADR/architecture files kept whole (<12K). Incremental via `git ls-remote` SHA check — unchanged repos skipped entirely.
+- **Jira**: JQL cursor pagination, max 1000 issues/project. **Delta sync**: second run onwards adds `AND updated >= last_completed_at` to JQL. First run: full fetch. **Parallel**: `SYNC_ATLASSIAN_WORKERS` workers (default 3) process projects concurrently; shared `_ATLASSIAN_RL` rate-limiter (7 req/s) caps combined throughput.
+- **Confluence**: recursive page fetch (depth ≤8), HTML stripped. **Delta sync**: second run onwards uses CQL search API (`lastModified >= last_completed_at`) — flat result, no recursive walk needed. First run: full recursive fetch. **Parallel**: same `SYNC_ATLASSIAN_WORKERS` workers and rate-limiter as Jira.
+- **GitHub**: language-aware chunking (Python=AST, Java=regex, fallback=2000-char text); ADR/architecture files kept whole (<12K). Incremental via `git ls-remote` SHA check — unchanged repos skipped entirely. **Parallel**: `SYNC_GITHUB_WORKERS` workers (default 4) clone/index repos concurrently; shared `_GITHUB_RL` rate-limiter (5 req/s).
 - **Sync schedule**: Track A (60min) — deployment state; Track B (4h) — Jira + Confluence + repos
-- **State**: `.sync_state.json` on Docker volume. Keys: git repo SHAs, `jira_project_{KEY}_completed_at`, `confluence_space_{KEY}_completed_at`, `last_shared_completed_at` (epoch seconds). All writes are append/upsert — safe across restarts.
+- **State**: `.sync_state.json` on Docker volume. Keys: git repo SHAs, `jira_project_{KEY}_completed_at`, `confluence_space_{KEY}_completed_at`, `kg_jira_project_{KEY}_completed_at`, `kg_github_repo_{REPO}_completed_at`, `last_shared_completed_at` (epoch seconds). All writes via `_update_state()` — atomic load-modify-save under `_STATE_LOCK`, safe for concurrent workers.
 - **Container restart resilience**: scheduler checks `last_shared_completed_at` at startup — skips initial full blast if completed within 4h. Per-project/space timestamps mean already-done work is skipped on resume; remaining items do their first-run full fetch and stamp themselves.
 - **Branch filtering**: signal branches only — `develop`, `master`, `main`, `release/*`, `release-*`, `hotfix/*`, `hotfix-*` always included; `feature/*`, `dev/*`, `bugfix/*`, `dependabot/*` etc permanently blocked by `_NOISE_BRANCH_RE`. `GIT_BRANCHES` env var adds extras to signal list.
 - **DevOps repos**: `DEVOPS_REPOS=greyorange/greymatter-deployment,greyorange/pick-assist-helm-charts,greyorange/jenkins` — indexed as separate target; every non-noise branch is indexed (each branch = one customer environment)

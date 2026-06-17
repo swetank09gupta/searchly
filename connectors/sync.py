@@ -45,6 +45,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -69,7 +70,8 @@ log = logging.getLogger(__name__)
 def _api_get(url: str, *, auth=None, headers=None, params=None,
              timeout: int = 30,
              max_retries: int = 6,
-             page_delay: float = 0.15) -> requests.Response:
+             page_delay: float = 0.15,
+             rate_limiter: "_RateLimiter | None" = None) -> requests.Response:
     """
     GET with automatic retry and rate-limit handling.
 
@@ -78,10 +80,14 @@ def _api_get(url: str, *, auth=None, headers=None, params=None,
       - 5xx Server Error      → exponential back-off (2, 4, 8, 16, 32s + jitter)
       - Network errors        → same back-off as 5xx
 
+    rate_limiter: when provided, its wait() replaces the fixed page_delay sleep.
     page_delay: minimum seconds to wait between every call (polite pacing).
                 Atlassian Cloud allows ~10 req/s per token; 0.15s keeps us at ~6/s.
     """
-    time.sleep(page_delay)   # polite pacing — always wait before firing
+    if rate_limiter is not None:
+        rate_limiter.wait()
+    else:
+        time.sleep(page_delay)   # polite pacing — always wait before firing
 
     backoff = 2.0
     for attempt in range(1, max_retries + 1):
@@ -127,20 +133,63 @@ _STATE_DIR.mkdir(parents=True, exist_ok=True)
 SYNC_STATE_FILE = _STATE_DIR / ".sync_state.json"
 
 
+_STATE_LOCK = threading.Lock()
+
+
 def _load_sync_state() -> dict:
-    if SYNC_STATE_FILE.exists():
-        try:
-            return json.loads(SYNC_STATE_FILE.read_text())
-        except Exception:
-            pass
-    return {}
+    with _STATE_LOCK:
+        if SYNC_STATE_FILE.exists():
+            try:
+                return json.loads(SYNC_STATE_FILE.read_text())
+            except Exception:
+                pass
+        return {}
 
 
 def _save_sync_state(state: dict):
-    try:
-        SYNC_STATE_FILE.write_text(json.dumps(state, indent=2))
-    except Exception as e:
-        log.warning("Could not save sync state: %s", e)
+    with _STATE_LOCK:
+        try:
+            SYNC_STATE_FILE.write_text(json.dumps(state, indent=2))
+        except Exception as e:
+            log.warning("Could not save sync state: %s", e)
+
+
+def _update_state(key: str, value) -> None:
+    """Atomically load → set key → save. Safe for concurrent workers."""
+    with _STATE_LOCK:
+        try:
+            state = {}
+            if SYNC_STATE_FILE.exists():
+                try:
+                    state = json.loads(SYNC_STATE_FILE.read_text())
+                except Exception:
+                    pass
+            state[key] = value
+            SYNC_STATE_FILE.write_text(json.dumps(state, indent=2))
+        except Exception as e:
+            log.warning("Could not update sync state key %s: %s", key, e)
+
+
+class _RateLimiter:
+    """Token-bucket rate limiter. Thread-safe."""
+
+    def __init__(self, rate: float):
+        self._rate = rate          # max requests per second
+        self._lock = threading.Lock()
+        self._last = 0.0
+
+    def wait(self):
+        min_interval = 1.0 / self._rate
+        with self._lock:
+            now = time.monotonic()
+            gap = self._last + min_interval - now
+            if gap > 0:
+                time.sleep(gap)
+            self._last = time.monotonic()
+
+
+_ATLASSIAN_RL = _RateLimiter(7)   # Atlassian Cloud: ~7 req/s per token
+_GITHUB_RL    = _RateLimiter(5)   # GitHub: ~5 req/s (conservative)
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +308,8 @@ class Config:
     searchly_user: str = "sync-bot"
 
     batch_size: int = 5
+    atlassian_workers: int = 3   # parallel Jira projects / Confluence spaces
+    github_workers: int = 4      # parallel GitHub repo indexing + KG
     jira_max_results: int = 1000
     confluence_max_results: int = 500
     git_max_file_kb: int = 500
@@ -299,6 +350,8 @@ def load_config(args) -> Config:
         searchly_user=opt("SEARCHLY_USER", "sync-bot"),
 
         batch_size=int(opt("SYNC_BATCH_SIZE", "5")),
+        atlassian_workers=int(opt("SYNC_ATLASSIAN_WORKERS", "3")),
+        github_workers=int(opt("SYNC_GITHUB_WORKERS", "4")),
         jira_max_results=int(opt("JIRA_MAX_RESULTS", "1000")),
         confluence_max_results=int(opt("CONFLUENCE_MAX_RESULTS", "500")),
         git_max_file_kb=int(opt("GIT_MAX_FILE_KB", "500")),
@@ -651,7 +704,7 @@ class RepoIndexer:
             log.warning("GitHub repo discovery failed: %s — falling back to products.yml only", exc)
             return []
 
-    def index_all_products(self, poster: SearchlyPoster):
+    def index_all_products(self, poster: SearchlyPoster, workers: int = 1):
         """
         Index all repos, combining two sources:
 
@@ -673,27 +726,20 @@ class RepoIndexer:
         If the HEAD SHA matches .sync_state.json, the repo is skipped.
         Use --force to bypass and re-index everything.
         """
-        updated_state = dict(self._sync_state)
-
         # ── Step 1: build repo → product mapping from products.yml ───────────
         repo_product_map = self._build_repo_product_map()
 
         # ── Step 2: collect the full repo work list ───────────────────────────
-        # Start with any repos explicitly listed in products.yml (these always
-        # run even if org discovery is unavailable).
         work: dict[str, tuple[str, str]] = {}   # repo_name → (product, priority)
         for repo_name, (product, priority) in repo_product_map.items():
             if repo_name not in self._skip_repos:
                 work[repo_name] = (product, priority)
 
-        # Layer in org-discovered repos.  Explicit products.yml entries take
-        # precedence for product name / priority; everything else is "unclassified".
         for repo in self._discover_repos():
             name = repo["name"]
             if name in self._skip_repos:
                 continue
             if name not in work:
-                # Not explicitly mapped — infer product from GitHub topics if possible
                 topics = repo.get("topics", [])
                 product = topics[0] if topics else "unclassified"
                 work[name] = (product, "high")
@@ -702,56 +748,52 @@ class RepoIndexer:
             log.warning(
                 "No repos to index. Set github_org in products.yml or add repos: entries."
             )
-            _save_sync_state(updated_state)
             return
 
-        log.info("Indexing %d repos total (%d from products.yml, %d auto-discovered)",
-                 len(work),
-                 len(repo_product_map),
-                 len(work) - len(repo_product_map))
+        log.info("Indexing %d repos total (%d from products.yml, %d auto-discovered) workers=%d",
+                 len(work), len(repo_product_map),
+                 len(work) - len(repo_product_map), workers)
 
-        branch_patterns = self.cfg.git_branches  # always includes signal branches
+        branch_patterns = self.cfg.git_branches
         log.info("Signal branch patterns: default + %s", branch_patterns)
 
         # ── Step 3: index each app repo (default branch + signal branches) ──────
-        for repo_name, (product_name, priority) in sorted(work.items()):
+        def _index_one_repo(item):
+            repo_name, (product_name, priority) = item
             exts = self.include_exts if priority != "low" else self.DOCS_ONLY_EXTS
             clone_url = self._resolve_url(repo_name)
             auth_url  = self._auth_url(clone_url)
 
-            # Always index the default branch
             docs, new_sha, state_key = self._index_repo(
                 clone_url, repo_name, product_name, exts=exts, branch=None
             )
             if new_sha:
-                updated_state[state_key] = new_sha
+                _update_state(state_key, new_sha)
             if docs:
                 poster.post_batch(docs, workers=self.cfg.batch_size)
 
-            # Index signal branches (develop, release/*, hotfix/*, etc.)
-            # _resolve_branches does a single ls-remote call per pattern, expanding
-            # globs — new branches matching a pattern are picked up automatically.
+            _GITHUB_RL.wait()
             for branch_name, _ in self._resolve_branches(auth_url, branch_patterns):
                 docs, new_sha, state_key = self._index_repo(
                     clone_url, repo_name, product_name,
                     exts=exts, branch=branch_name
                 )
                 if new_sha:
-                    updated_state[state_key] = new_sha
+                    _update_state(state_key, new_sha)
                 if docs:
                     poster.post_batch(docs, workers=self.cfg.batch_size)
 
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers,
+                thread_name_prefix="git") as pool:
+            list(pool.map(_index_one_repo, sorted(work.items())))
+
         # ── Step 4: DevOps / deployment repos ────────────────────────────────────
-        # These repos are NOT auto-discovered from the org — they are maintained
-        # separately because their branches map to customer environments, not
-        # product releases.  We index ALL non-noise branches so each customer's
-        # deployment config is searchable.
         if self.cfg.devops_repos:
             log.info("Syncing %d DevOps repos: %s", len(self.cfg.devops_repos),
                      self.cfg.devops_repos)
-            self._index_devops_repos(self.cfg.devops_repos, poster, updated_state)
-
-        _save_sync_state(updated_state)
+            # DevOps repos update state internally via _update_state
+            self._index_devops_repos(self.cfg.devops_repos, poster, {})
 
     def _resolve_url(self, repo_name_or_url: str) -> str:
         if repo_name_or_url.startswith("http") or repo_name_or_url.startswith("git@"):
@@ -820,7 +862,7 @@ class RepoIndexer:
             log.warning("ls-remote --heads failed for %s: %s", auth_url, exc)
             return []
 
-    def _index_devops_repos(self, repo_specs: list[str], poster, updated_state: dict):
+    def _index_devops_repos(self, repo_specs: list[str], poster, updated_state: dict = None):
         """
         Index DevOps/deployment repos.  Unlike app repos, every non-noise branch
         is indexed — each branch typically corresponds to one customer environment.
@@ -858,7 +900,7 @@ class RepoIndexer:
                 clone_url, repo_name, "devops", exts=self.include_exts, branch=None
             )
             if new_sha:
-                updated_state[state_key] = new_sha
+                _update_state(state_key, new_sha)
             if docs:
                 poster.post_batch(docs, workers=self.cfg.batch_size)
 
@@ -876,7 +918,7 @@ class RepoIndexer:
                     exts=self.include_exts, branch=branch_name
                 )
                 if new_sha:
-                    updated_state[state_key] = new_sha
+                    _update_state(state_key, new_sha)
                 if docs:
                     poster.post_batch(docs, workers=self.cfg.batch_size)
 
@@ -1020,6 +1062,7 @@ class RepoIndexer:
                     headers=headers,
                     params={"state": "closed", "per_page": 50, "page": page},
                     timeout=20,
+                    rate_limiter=_GITHUB_RL,
                 )
                 remaining = r.headers.get("X-RateLimit-Remaining", "999")
                 if int(remaining) < 20:
@@ -1425,9 +1468,13 @@ class JiraFetcher:
         self.base = cfg.jira_url
         self.auth = (cfg.jira_email, cfg.jira_token)
         self.max = cfg.jira_max_results
+        self._rl = _ATLASSIAN_RL
+
+    def _get(self, url, **kwargs):
+        return _api_get(url, auth=self.auth, rate_limiter=self._rl, **kwargs)
 
     def list_projects(self):
-        r = _api_get(f"{self.base}/rest/api/3/project", auth=self.auth, timeout=30)
+        r = self._get(f"{self.base}/rest/api/3/project", timeout=30)
         r.raise_for_status()
         return [p["key"] for p in r.json()]
 
@@ -1453,7 +1500,7 @@ class JiraFetcher:
         processed = 0
         while True:
             try:
-                r = _api_get(f"{self.base}/rest/api/3/search/jql", auth=self.auth,
+                r = self._get(f"{self.base}/rest/api/3/search/jql",
                              params=params, timeout=30)
                 r.raise_for_status()
                 data = r.json()
@@ -1493,8 +1540,8 @@ class JiraFetcher:
                       "comment,issuetype,created,updated,fixVersions,components",
         }
         while True:
-            r = _api_get(
-                f"{self.base}/rest/api/3/search/jql", auth=self.auth,
+            r = self._get(
+                f"{self.base}/rest/api/3/search/jql",
                 params=params,
                 timeout=30,
             )
@@ -1524,9 +1571,9 @@ class JiraFetcher:
         Skips on HTTP error (some projects disable remote links).
         """
         try:
-            r = _api_get(
+            r = self._get(
                 f"{self.base}/rest/api/3/issue/{issue_key}/remotelink",
-                auth=self.auth, timeout=15,
+                timeout=15,
             )
             if r.status_code == 403 or r.status_code == 404:
                 return []
@@ -1640,10 +1687,14 @@ class ConfluenceFetcher:
         self.base = cfg.confluence_url
         self.auth = (cfg.confluence_email, cfg.confluence_token)
         self.max = cfg.confluence_max_results
+        self._rl = _ATLASSIAN_RL
+
+    def _get(self, url, **kwargs):
+        return _api_get(url, auth=self.auth, rate_limiter=self._rl, **kwargs)
 
     def list_spaces(self):
-        r = _api_get(f"{self.base}/wiki/rest/api/space", auth=self.auth,
-                     params={"limit": 200, "type": "global"}, timeout=30)
+        r = self._get(f"{self.base}/wiki/rest/api/space",
+                      params={"limit": 200, "type": "global"}, timeout=30)
         r.raise_for_status()
         return [s["key"] for s in r.json().get("results", [])]
 
@@ -1658,9 +1709,8 @@ class ConfluenceFetcher:
             return
         start = 0
         while True:
-            r = _api_get(
+            r = self._get(
                 f"{self.base}/wiki/rest/api/content/{parent_id}/child/page",
-                auth=self.auth,
                 params={"expand": "body.storage,metadata.labels,history.lastUpdated",
                         "start": start, "limit": 50},
                 timeout=30,
@@ -1689,8 +1739,8 @@ class ConfluenceFetcher:
         pages, start = [], 0
         top_level_count = 0
         while True:
-            r = _api_get(
-                f"{self.base}/wiki/rest/api/content", auth=self.auth,
+            r = self._get(
+                f"{self.base}/wiki/rest/api/content",
                 params={"spaceKey": space, "type": "page", "status": "current",
                         "expand": "body.storage,metadata.labels,history.lastUpdated",
                         "start": start, "limit": 50},
@@ -1723,8 +1773,8 @@ class ConfluenceFetcher:
         cql = f'space = "{space}" AND type = "page" AND lastModified >= "{dt}"'
         pages, start = [], 0
         while True:
-            r = _api_get(
-                f"{self.base}/wiki/rest/api/search", auth=self.auth,
+            r = self._get(
+                f"{self.base}/wiki/rest/api/search",
                 params={"cql": cql,
                         "expand": "body.storage,metadata.labels,history.lastUpdated",
                         "start": start, "limit": 50},
@@ -1867,27 +1917,30 @@ def main():
         if cfg.jira_url and cfg.jira_token:
             jira = JiraFetcher(cfg)
             projects = cfg.jira_projects or jira.list_projects()
-            log.info("Syncing Jira: %s", projects)
-            for proj in projects:
+            log.info("Syncing Jira: %s (workers=%d)", projects, cfg.atlassian_workers)
+
+            def _sync_jira_project(proj: str) -> None:
                 state = _load_sync_state()
                 since = None if cfg.force else state.get(f"jira_project_{proj}_completed_at")
                 since = int(since) if since else None
-                # KG has its own timestamp — first KG run is always a full historical backfill;
-                # subsequent runs only process issues updated since the last KG completion.
                 kg_since_ts = None if cfg.force else state.get(f"kg_jira_project_{proj}_completed_at")
                 kg_since = int(kg_since_ts) if kg_since_ts else None
                 try:
                     docs = [part for d in jira.fetch_issues(proj, since=since)
                             for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
-                    # KG extraction: entities + remote-link relationships for each issue
                     jira.sync_kg_for_project(proj, kg, since=kg_since)
-                    state = _load_sync_state()
-                    state[f"jira_project_{proj}_completed_at"] = int(time.time())
-                    state[f"kg_jira_project_{proj}_completed_at"] = int(time.time())
-                    _save_sync_state(state)
+                    now = int(time.time())
+                    _update_state(f"jira_project_{proj}_completed_at", now)
+                    _update_state(f"kg_jira_project_{proj}_completed_at", now)
                 except Exception as e:
                     log.error("Jira %s: %s", proj, e)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=cfg.atlassian_workers,
+                    thread_name_prefix="jira") as pool:
+                list(pool.map(_sync_jira_project, projects))
+
             poster.purge_stale("jira", sync_started_at)
         else:
             log.info("Jira not configured, skipping.")
@@ -1897,8 +1950,9 @@ def main():
         if cfg.confluence_url and cfg.confluence_token:
             conf = ConfluenceFetcher(cfg)
             spaces = cfg.confluence_spaces or conf.list_spaces()
-            log.info("Syncing Confluence: %s", spaces)
-            for space in spaces:
+            log.info("Syncing Confluence: %s (workers=%d)", spaces, cfg.atlassian_workers)
+
+            def _sync_confluence_space(space: str) -> None:
                 state = _load_sync_state()
                 since = None if cfg.force else state.get(f"confluence_space_{space}_completed_at")
                 since = int(since) if since else None
@@ -1906,11 +1960,15 @@ def main():
                     docs = [part for d in conf.fetch_pages(space, since=since)
                             for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
-                    state = _load_sync_state()
-                    state[f"confluence_space_{space}_completed_at"] = int(time.time())
-                    _save_sync_state(state)
+                    _update_state(f"confluence_space_{space}_completed_at", int(time.time()))
                 except Exception as e:
                     log.error("Confluence %s: %s", space, e)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=cfg.atlassian_workers,
+                    thread_name_prefix="confluence") as pool:
+                list(pool.map(_sync_confluence_space, spaces))
+
             poster.purge_stale("confluence", sync_started_at)
         else:
             log.info("Confluence not configured, skipping.")
@@ -1918,33 +1976,37 @@ def main():
     # ── Repos ─────────────────────────────────────────────────────────────
     if not only or only in ("shared", "repos"):
         if products_cfg:
-            log.info("Indexing repos from products.yml ...")
+            log.info("Indexing repos from products.yml (workers=%d) ...", cfg.github_workers)
             repo_indexer = RepoIndexer(cfg, products_cfg)
-            repo_indexer.index_all_products(poster)
+            repo_indexer.index_all_products(poster, workers=cfg.github_workers)
             poster.purge_stale("git", sync_started_at)
             # KG extraction: merged PRs → service relationships via GitHub API
             org = products_cfg.get("github_org", "")
             if org and cfg.github_token:
-                log.info("Syncing KG for GitHub repos (%s)...", org)
-                for repo_info in repo_indexer._discover_repos():
-                    repo_name = repo_info["name"]
-                    if repo_name not in repo_indexer._skip_repos:
-                        try:
-                            # KG has its own per-repo timestamp independent of git indexing.
-                            # First KG run = full historical backfill (no since); subsequent
-                            # runs pass an ISO datetime so only newly merged PRs are fetched.
-                            kg_state = _load_sync_state()
-                            kg_repo_ts = None if cfg.force else kg_state.get(f"kg_github_repo_{repo_name}_completed_at")
-                            kg_repo_since = (
-                                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(kg_repo_ts)))
-                                if kg_repo_ts else None
-                            )
-                            repo_indexer.sync_kg_for_repo(repo_name, org, kg, since=kg_repo_since)
-                            kg_state = _load_sync_state()
-                            kg_state[f"kg_github_repo_{repo_name}_completed_at"] = int(time.time())
-                            _save_sync_state(kg_state)
-                        except Exception as e:
-                            log.debug("KG GitHub %s/%s: %s", org, repo_name, e)
+                repos_for_kg = [
+                    r["name"] for r in repo_indexer._discover_repos()
+                    if r["name"] not in repo_indexer._skip_repos
+                ]
+                log.info("Syncing KG for %d GitHub repos (%s) workers=%d",
+                         len(repos_for_kg), org, cfg.github_workers)
+
+                def _sync_kg_repo(repo_name: str) -> None:
+                    try:
+                        kg_state = _load_sync_state()
+                        kg_repo_ts = None if cfg.force else kg_state.get(f"kg_github_repo_{repo_name}_completed_at")
+                        kg_repo_since = (
+                            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(kg_repo_ts)))
+                            if kg_repo_ts else None
+                        )
+                        repo_indexer.sync_kg_for_repo(repo_name, org, kg, since=kg_repo_since)
+                        _update_state(f"kg_github_repo_{repo_name}_completed_at", int(time.time()))
+                    except Exception as e:
+                        log.debug("KG GitHub %s/%s: %s", org, repo_name, e)
+
+                with concurrent.futures.ThreadPoolExecutor(
+                        max_workers=cfg.github_workers,
+                        thread_name_prefix="kg-gh") as pool:
+                    list(pool.map(_sync_kg_repo, repos_for_kg))
         else:
             log.info("products.yml not loaded, skipping repos.")
 

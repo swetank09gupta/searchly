@@ -56,10 +56,8 @@ These three are independent, can be done in parallel, and require no schema chan
 **Fix:** Catch exceptions in `IndexingConsumer.process()` per message. After 3 retries (exponential backoff), publish the message to `indexing.dlq` topic and commit the offset. Add Prometheus counter `indexing_dlq_total`.  
 **Files:** `IndexingConsumer.java`, `RetryConsumer.java` (already exists — wire it to DLQ sink), Kafka topic config.
 
-### S3.2 — Bound Kafka max.poll.records  `indexer/application.yml`
-**Why:** Default max.poll.records=500. A burst of 500 × 1MB documents enters `processBatch` simultaneously. The 50-chunk/batch embed limit and 256m heap are stop-gaps, not fixes.  
-**Fix:** Set `max.poll.records=10` in consumer config. Add a semaphore (`Semaphore(2)`) around `processBatch` to limit concurrent indexing threads.  
-**Files:** `indexer/src/main/resources/application.yml` — 2-line change.
+### S3.2 — Bound Kafka max.poll.records  ✅ Done
+Set `max.poll.records=10` in `indexer/src/main/resources/application.yml`.
 
 ### S3.3 — Redis Failure Degradation in Rate Limiter  `gateway/`
 **Why:** Redis failure causes every request to return 429. The rate limiter fails closed.  
@@ -125,3 +123,5 @@ These three are independent, can be done in parallel, and require no schema chan
 - [x] Container restart resilience — scheduler checks `last_shared_completed_at` at startup; skips initial full sync if completed within `SYNC_FULL_INTERVAL_HOURS`
 - [x] Incremental Jira sync — delta JQL `AND updated >= last_completed_at` on every run after first; `--force` bypasses
 - [x] Incremental Confluence sync — delta CQL search `lastModified >= last_completed_at` on every run after first; switches from recursive content API to flat search API for delta mode
+- [x] Parallel sync workers — Jira/Confluence via `SYNC_ATLASSIAN_WORKERS` (default 3), GitHub repos/KG via `SYNC_GITHUB_WORKERS` (default 4); thread-safe state via `_STATE_LOCK` + `_update_state()`; shared rate limiters `_ATLASSIAN_RL` (7 req/s) + `_GITHUB_RL` (5 req/s)
+- [x] Kafka `max.poll.records=10` — prevents OOM burst when parallel sync fills Kafka faster
