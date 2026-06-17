@@ -1586,6 +1586,9 @@ def main():
     # Indexes which image version is running per customer per env.
     # Pod logs are NOT indexed here — they are fetched live at query time.
     if only == "all-customers-deploy" or only == "all-customers" or (not only and customers):
+        if not customers:
+            log.info("No customers configured, skipping deployment state refresh.")
+            return
         log.info(
             "Refreshing deployment state for %d customers (all configured envs)...",
             len(customers),
