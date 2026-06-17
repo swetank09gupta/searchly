@@ -788,7 +788,7 @@ class RepoIndexer:
         Repos not listed here get product="unclassified" and priority="high".
         """
         mapping: dict[str, tuple[str, str]] = {}
-        for product_name, product_cfg in self.products.get("products", {}).items():
+        for product_name, product_cfg in (self.products.get("products") or {}).items():
             priority = product_cfg.get("priority", "high")
             for repo_name in product_cfg.get("repos", []):
                 mapping[repo_name] = (product_name, priority)
