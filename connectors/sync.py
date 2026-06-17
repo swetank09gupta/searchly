@@ -1711,7 +1711,8 @@ class JiraFetcher:
         try:
             r = self._get(
                 f"{self.base}/rest/api/3/issue/{issue_key}/remotelink",
-                timeout=15,
+                timeout=5,
+                max_retries=2,
             )
             if r.status_code == 403 or r.status_code == 404:
                 return []
