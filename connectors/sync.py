@@ -1840,13 +1840,19 @@ class ConfluenceFetcher:
                         acc: list, depth: int = 0) -> None:
         """Recursively fetch child pages of *parent_id*, appending docs to *acc*.
 
-        Guards against runaway recursion with a hard depth limit of 8.
+        Guards against runaway recursion with a hard depth limit of 8 AND a
+        total-page cap (self.max) so large spaces don't consume unbounded memory.
         """
         if depth >= 8:
             log.debug("Confluence child fetch: depth limit reached for page %s", parent_id)
             return
+        if len(acc) >= self.max:
+            log.debug("Confluence child fetch: total page cap %d reached", self.max)
+            return
         start = 0
         while True:
+            if len(acc) >= self.max:
+                break
             r = self._get(
                 f"{self.base}/wiki/rest/api/content/{parent_id}/child/page",
                 params={"expand": "body.storage,metadata.labels,history.lastUpdated",
@@ -1861,6 +1867,8 @@ class ConfluenceFetcher:
             if not batch:
                 break
             for page in batch:
+                if len(acc) >= self.max:
+                    break
                 doc = self._to_doc(page, space)
                 if doc:
                     acc.append(doc)
@@ -2097,6 +2105,13 @@ def main():
             msg = f"Jira section failed: {exc}"
             log.error(msg)
             shared_errors.append(msg)
+        finally:
+            import gc, ctypes
+            gc.collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
 
     def _run_confluence() -> None:
         if not (only is None or only in ("shared", "confluence")):
@@ -2131,6 +2146,13 @@ def main():
             msg = f"Confluence section failed: {exc}"
             log.error(msg)
             shared_errors.append(msg)
+        finally:
+            import gc, ctypes
+            gc.collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
 
     def _rss_mb() -> int:
         try:
