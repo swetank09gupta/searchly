@@ -253,6 +253,9 @@ services:
       SYNC_DEPLOY_INTERVAL_MIN:   ${SYNC_DEPLOY_INTERVAL_MIN:-60}   # deployment state refresh
       SYNC_FULL_INTERVAL_HOURS:   ${SYNC_FULL_INTERVAL_HOURS:-4}    # Jira + Confluence + repos
       # SYNC_STARTUP_WAIT_SEC:    90    # grace period before very first sync
+      # Workers=1: large repos fill 20-25 GB page cache per walk; sequential keeps peak
+      # to one repo at a time (reclaimable) vs 4×25 GB = 100 GB concurrent (VM crash).
+      SYNC_GITHUB_WORKERS:        1
     volumes:
       # .sync_state.json persists here so incremental indexing survives restarts
       - sync-state:/data
@@ -262,7 +265,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 8g
+          # 30g: large repos (e.g. greymatter-deployment) fill ~25 GB page cache per walk.
+          # Page cache is evictable but Docker cgroup counts it; 8g would OOM.
+          memory: 30g
     depends_on:
       search-api: { condition: service_started }
     restart: unless-stopped
