@@ -196,8 +196,11 @@ async def run_agent(
             knowledge_only=False,
         )
 
-    # Phase 2: Execution — run all planned tools
-    for tc in tool_calls_to_run:
+    # Phase 2: Execution — run all planned tools.
+    # Tools are independent (planner outputs a flat list, not a chain), so run in parallel.
+    import asyncio
+
+    async def _run_one(tc: dict) -> tuple[str, dict]:
         fn_name = tc.get("function", {}).get("name", "")
         fn_args = tc.get("function", {}).get("arguments", {})
         if isinstance(fn_args, str):
@@ -205,29 +208,26 @@ async def run_agent(
                 fn_args = json.loads(fn_args)
             except json.JSONDecodeError:
                 fn_args = {}
-
         log.info("[plan] tool=%s args=%s", fn_name,
                  {k: v for k, v in fn_args.items() if k not in ("grep",)})
-
         fn = TOOL_REGISTRY.get(fn_name)
-        result: dict
         if fn is None:
-            result = {"error": f"Unknown tool: {fn_name}"}
-        else:
-            if fn_name in ("get_logs", "get_deployment_state",
-                           "get_pod_status", "list_log_indices"):
-                fn_args["customer_obj"] = _RUNTIME["customer_obj"]
-                fn_args.pop("customer_id", None)
-            elif fn_name == "search_knowledge":
-                fn_args.setdefault("searchly_url",   _RUNTIME["searchly_url"])
-                fn_args.setdefault("tenant",         _RUNTIME["searchly_tenant"])
-                fn_args.setdefault("customer_id",    customer_id)
-            try:
-                result = await fn(**fn_args)
-            except Exception as e:
-                log.warning("Tool %s failed: %s", fn_name, e)
-                result = {"error": str(e)}
+            return fn_name, {"error": f"Unknown tool: {fn_name}"}
+        if fn_name in ("get_logs", "get_deployment_state", "get_pod_status", "list_log_indices"):
+            fn_args["customer_obj"] = _RUNTIME["customer_obj"]
+            fn_args.pop("customer_id", None)
+        elif fn_name == "search_knowledge":
+            fn_args.setdefault("searchly_url",   _RUNTIME["searchly_url"])
+            fn_args.setdefault("tenant",         _RUNTIME["searchly_tenant"])
+            fn_args.setdefault("customer_id",    customer_id)
+        try:
+            return fn_name, await fn(**fn_args)
+        except Exception as e:
+            log.warning("Tool %s failed: %s", fn_name, e)
+            return fn_name, {"error": str(e)}
 
+    results_list = await asyncio.gather(*[_run_one(tc) for tc in tool_calls_to_run])
+    for fn_name, result in results_list:
         tools_called.append(fn_name)
         tool_results[fn_name] = result
         messages.append({
@@ -415,8 +415,14 @@ async def run_agent_stream(
             searchly_url, searchly_tenant, knowledge_only=False,
         )
 
-    # Phase 2: Execution
-    for tc in tool_calls_to_run:
+    # Phase 2: Execution — run all tools in parallel, emit a single combined status line
+    import asyncio
+
+    if tool_calls_to_run:
+        tool_names = [tc.get("function", {}).get("name", "") for tc in tool_calls_to_run]
+        yield {"type": "status", "message": "Running: " + ", ".join(tool_names) + "…"}
+
+    async def _run_one_stream(tc: dict) -> tuple[str, dict]:
         fn_name = tc.get("function", {}).get("name", "")
         fn_args = tc.get("function", {}).get("arguments", {})
         if isinstance(fn_args, str):
@@ -424,27 +430,24 @@ async def run_agent_stream(
                 fn_args = json.loads(fn_args)
             except json.JSONDecodeError:
                 fn_args = {}
-
-        yield {"type": "status", "message": _tool_status_message(fn_name, fn_args)}
-
         fn = TOOL_REGISTRY.get(fn_name)
         if fn is None:
-            result = {"error": f"Unknown tool: {fn_name}"}
-        else:
-            if fn_name in ("get_logs", "get_deployment_state",
-                           "get_pod_status", "list_log_indices"):
-                fn_args["customer_obj"] = _RUNTIME["customer_obj"]
-                fn_args.pop("customer_id", None)
-            elif fn_name == "search_knowledge":
-                fn_args.setdefault("searchly_url",    _RUNTIME["searchly_url"])
-                fn_args.setdefault("tenant",          _RUNTIME["searchly_tenant"])
-                fn_args.setdefault("customer_id",     customer_id)
-            try:
-                result = await fn(**fn_args)
-            except Exception as e:
-                log.warning("Tool %s failed: %s", fn_name, e)
-                result = {"error": str(e)}
+            return fn_name, {"error": f"Unknown tool: {fn_name}"}
+        if fn_name in ("get_logs", "get_deployment_state", "get_pod_status", "list_log_indices"):
+            fn_args["customer_obj"] = _RUNTIME["customer_obj"]
+            fn_args.pop("customer_id", None)
+        elif fn_name == "search_knowledge":
+            fn_args.setdefault("searchly_url",    _RUNTIME["searchly_url"])
+            fn_args.setdefault("tenant",          _RUNTIME["searchly_tenant"])
+            fn_args.setdefault("customer_id",     customer_id)
+        try:
+            return fn_name, await fn(**fn_args)
+        except Exception as e:
+            log.warning("Tool %s failed: %s", fn_name, e)
+            return fn_name, {"error": str(e)}
 
+    results_list = await asyncio.gather(*[_run_one_stream(tc) for tc in tool_calls_to_run])
+    for fn_name, result in results_list:
         tools_called.append(fn_name)
         tool_results[fn_name] = result
         messages.append({

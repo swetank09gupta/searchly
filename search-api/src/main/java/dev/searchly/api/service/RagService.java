@@ -25,6 +25,11 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.regex.Pattern;
 
 /**
  * RAG pipeline — multi-product, customer-aware:
@@ -51,6 +56,15 @@ public class RagService {
     private static final int RERANK_CANDIDATES = 30;
     private static final int CONTEXT_CHUNKS = 6;
     private static final int RRF_K = 60;
+
+    // Virtual-thread pool for I/O-bound retrieval legs — zero OS threads blocked
+    private static final ExecutorService RETRIEVAL_POOL = Executors.newVirtualThreadPerTaskExecutor();
+
+    // Queries that are already precise enough to not benefit from rewriting
+    private static final Pattern SKIP_REWRITE_RE = Pattern.compile(
+        "^[\\w\\s\\-]{1,40}$|[A-Z]{2,6}-\\d{2,6}",  // short query OR contains Jira key
+        Pattern.CASE_INSENSITIVE
+    );
 
     private final EmbeddingClient embedder;
     private final KnnSearchClient knnClient;
@@ -161,43 +175,57 @@ public class RagService {
         log.debug("Metadata filters: env={} service={} source={} (explicit env={} product={})",
                   effectiveEnv, effectiveService, qf.sourceType(), env, product);
 
-        // 1. Rewrite query for additional coverage — run searches on BOTH original and rewritten
-        //    to avoid query drift (original preserves precision; rewritten adds recall)
-        String rewrittenQuery = rewriteQuery(question);
-        boolean queryChanged = !rewrittenQuery.equals(question);
+        // 1. Rewrite query + embed original — run concurrently since they're independent.
+        //    Short queries and Jira-key lookups skip rewrite: no LLM overhead, less drift.
+        CompletableFuture<String> rewriteFuture = shouldSkipRewrite(question)
+                ? CompletableFuture.completedFuture(question)
+                : CompletableFuture.supplyAsync(() -> rewriteQuery(question), RETRIEVAL_POOL);
+        CompletableFuture<List<Double>> origVecFuture =
+                CompletableFuture.supplyAsync(() -> embedder.embedQuery(question), RETRIEVAL_POOL);
+
+        String       rewrittenQuery = rewriteFuture.join();
+        List<Double> origVec        = origVecFuture.join();
+        boolean      queryChanged   = !rewrittenQuery.equals(question);
         log.debug("Query rewrite: [{}] -> [{}] (changed={})", question, rewrittenQuery, queryChanged);
 
-        // 2. Embed both queries
-        List<Double> origVec     = embedder.embedQuery(question);
-        List<Double> rewriteVec  = queryChanged ? embedder.embedQuery(rewrittenQuery) : origVec;
+        // 2. Embed rewritten (fast, ~25ms — do inline now that origVec + rewrite are done)
+        List<Double> rewriteVec = queryChanged ? embedder.embedQuery(rewrittenQuery) : origVec;
 
-        // 3. Shared knowledge — kNN(original) + kNN(rewritten) + BM25(original) + BM25(rewritten)
-        //    All calls use metadata-filtered env + service from query extraction
-        List<KnnSearchClient.ChunkHit> knnOrig = origVec.isEmpty() ? List.of()
-                : knnClient.searchWithService(chunkIndex, origVec, ctx.tenantId(), CANDIDATE_K,
-                                              customer, effectiveProduct, effectiveEnv, effectiveService);
-        List<KnnSearchClient.ChunkHit> knnRew = (queryChanged && !rewriteVec.isEmpty()) ?
-                knnClient.searchWithService(chunkIndex, rewriteVec, ctx.tenantId(), CANDIDATE_K,
-                                            customer, effectiveProduct, effectiveEnv, effectiveService)
-                : List.of();
-        List<KnnSearchClient.ChunkHit> bm25Orig =
-                bm25SearchWithService(chunkIndex, question, ctx.tenantId(), customer,
-                                     effectiveProduct, effectiveEnv, effectiveService);
-        List<KnnSearchClient.ChunkHit> bm25Rew = queryChanged ?
-                bm25SearchWithService(chunkIndex, rewrittenQuery, ctx.tenantId(), customer,
-                                     effectiveProduct, effectiveEnv, effectiveService)
-                : List.of();
+        // 3 + 4. All retrieval legs in parallel — each is independent I/O against OpenSearch.
+        //        With 6 legs × ~50ms sequential = ~300ms → parallel wall-clock ~50ms.
+        final String  fi = chunkIndex;
+        final String  ft = ctx.tenantId();
+        final String  fc = customer, fp = effectiveProduct, fe = effectiveEnv, fs = effectiveService;
+        final List<Double> fOrig = origVec, fRew = rewriteVec;
 
-        // 4. Customer-specific chunks (logs + deployment state), if customer specified
-        List<KnnSearchClient.ChunkHit> customerKnnHits = List.of();
-        List<KnnSearchClient.ChunkHit> customerBm25Hits = List.of();
-        if (customer != null && !customer.isBlank()) {
-            customerKnnHits = origVec.isEmpty() ? List.of()
-                    : knnClient.searchByCustomer(chunkIndex, origVec, ctx.tenantId(),
-                                                 customer, CANDIDATE_K);
-            customerBm25Hits = bm25SearchByCustomer(chunkIndex, question,
-                                                     ctx.tenantId(), customer);
-        }
+        CompletableFuture<List<KnnSearchClient.ChunkHit>> fKnnOrig = origVec.isEmpty()
+                ? CompletableFuture.completedFuture(List.of())
+                : asyncRetrieval(() -> knnClient.searchWithService(fi, fOrig, ft, CANDIDATE_K, fc, fp, fe, fs));
+        CompletableFuture<List<KnnSearchClient.ChunkHit>> fKnnRew = (!queryChanged || rewriteVec.isEmpty())
+                ? CompletableFuture.completedFuture(List.of())
+                : asyncRetrieval(() -> knnClient.searchWithService(fi, fRew, ft, CANDIDATE_K, fc, fp, fe, fs));
+        CompletableFuture<List<KnnSearchClient.ChunkHit>> fBm25Orig =
+                asyncRetrieval(() -> bm25SearchWithService(fi, question, ft, fc, fp, fe, fs));
+        CompletableFuture<List<KnnSearchClient.ChunkHit>> fBm25Rew = queryChanged
+                ? asyncRetrieval(() -> bm25SearchWithService(fi, rewrittenQuery, ft, fc, fp, fe, fs))
+                : CompletableFuture.completedFuture(List.of());
+        CompletableFuture<List<KnnSearchClient.ChunkHit>> fCustKnn =
+                (customer != null && !customer.isBlank() && !origVec.isEmpty())
+                ? asyncRetrieval(() -> knnClient.searchByCustomer(fi, fOrig, ft, fc, CANDIDATE_K))
+                : CompletableFuture.completedFuture(List.of());
+        CompletableFuture<List<KnnSearchClient.ChunkHit>> fCustBm25 =
+                (customer != null && !customer.isBlank())
+                ? asyncRetrieval(() -> bm25SearchByCustomer(fi, question, ft, fc))
+                : CompletableFuture.completedFuture(List.of());
+
+        CompletableFuture.allOf(fKnnOrig, fKnnRew, fBm25Orig, fBm25Rew, fCustKnn, fCustBm25).join();
+
+        List<KnnSearchClient.ChunkHit> knnOrig       = fKnnOrig.join();
+        List<KnnSearchClient.ChunkHit> knnRew         = fKnnRew.join();
+        List<KnnSearchClient.ChunkHit> bm25Orig       = fBm25Orig.join();
+        List<KnnSearchClient.ChunkHit> bm25Rew         = fBm25Rew.join();
+        List<KnnSearchClient.ChunkHit> customerKnnHits  = fCustKnn.join();
+        List<KnnSearchClient.ChunkHit> customerBm25Hits = fCustBm25.join();
 
         // 5. RRF merge all 6 lists — customer chunks 2×, rewrite lists 1× (additive recall)
         MergeResult merged = rrfMerge(
@@ -394,6 +422,28 @@ public class RagService {
             scores.merge(h.chunkId(), weight * authorityBoost / (RRF_K + i + 1), Double::sum);
             byId.putIfAbsent(h.chunkId(), h);
         }
+    }
+
+    /** Wrap a checked-exception supplier for use with CompletableFuture. */
+    @FunctionalInterface
+    private interface RetrievalTask { List<KnnSearchClient.ChunkHit> call() throws Exception; }
+
+    private static CompletableFuture<List<KnnSearchClient.ChunkHit>> asyncRetrieval(RetrievalTask task) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return task.call();
+            } catch (Exception e) {
+                log.warn("Async retrieval leg failed: {}", e.getMessage());
+                return List.of();
+            }
+        }, RETRIEVAL_POOL);
+    }
+
+    /** Short queries and Jira-key lookups are precise enough to skip LLM rewriting. */
+    private static boolean shouldSkipRewrite(String question) {
+        String trimmed = question.trim();
+        long wordCount = trimmed.isEmpty() ? 0 : trimmed.chars().filter(c -> c == ' ').count() + 1;
+        return wordCount <= 5 || SKIP_REWRITE_RE.matcher(trimmed).find();
     }
 
     /**

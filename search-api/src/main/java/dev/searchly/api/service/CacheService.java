@@ -39,8 +39,12 @@ public class CacheService {
     }
 
     public void put(String key, DocumentDto.SearchResponse value) {
+        put(key, value, ttl);
+    }
+
+    public void put(String key, DocumentDto.SearchResponse value, Duration customTtl) {
         try {
-            redis.opsForValue().set(key, mapper.writeValueAsString(value), ttl);
+            redis.opsForValue().set(key, mapper.writeValueAsString(value), customTtl);
         } catch (JsonProcessingException ignored) {}
     }
 

@@ -99,7 +99,15 @@ class ChatHandler:
                 return result
 
         # ── Step 2: Extract entities from this message ─────────────────────
-        entities = await extract_entities(message, self.ollama_url, self.ollama_model)
+        # If the session already has a resolved customer + env, skip the LLM extraction
+        # (~500ms Ollama call) and use the fast regex fallback instead. The LLM is only
+        # needed when we don't yet know who we're talking about.
+        session_resolved = bool(session.resolved_customer_id and session.resolved_env)
+        if session_resolved and not customer_hint and not env_hint:
+            from entity_extractor import _regex_extract
+            entities = _regex_extract(message)
+        else:
+            entities = await extract_entities(message, self.ollama_url, self.ollama_model)
 
         # URL params take precedence over extracted hints
         c_hint = customer_hint or entities.get("customer_hint")
@@ -264,9 +272,14 @@ class ChatHandler:
                 yield {"type": "done", **result}
                 return
 
-        # Step 2: Extract entities
-        yield {"type": "status", "message": "Extracting entities…"}
-        entities = await extract_entities(message, self.ollama_url, self.ollama_model)
+        # Step 2: Extract entities — skip LLM if session already resolved
+        session_resolved = bool(session.resolved_customer_id and session.resolved_env)
+        if session_resolved and not customer_hint and not env_hint:
+            from entity_extractor import _regex_extract
+            entities = _regex_extract(message)
+        else:
+            yield {"type": "status", "message": "Extracting entities…"}
+            entities = await extract_entities(message, self.ollama_url, self.ollama_model)
 
         c_hint = customer_hint or entities.get("customer_hint")
         e_hint = env_hint      or entities.get("env_hint")
