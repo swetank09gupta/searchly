@@ -2064,7 +2064,6 @@ def main():
     # both); GitHub sections share _GITHUB_RL (5 req/s cap).
     # Running in parallel means a slow Confluence full-fetch no longer blocks
     # GitHub repo indexing from starting.
-    shared_threads: list[threading.Thread] = []
     shared_errors:  list[str] = []
 
     def _run_jira() -> None:
@@ -2074,6 +2073,7 @@ def main():
             log.info("Jira not configured, skipping.")
             return
         try:
+            log.info("Jira section start: RSS=%dMB", _rss_mb())
             jira = JiraFetcher(cfg)
             projects = cfg.jira_projects or jira.list_projects()
             log.info("Syncing Jira: %s (adaptive, max=%d)", projects, cfg.atlassian_workers)
@@ -2120,6 +2120,7 @@ def main():
             log.info("Confluence not configured, skipping.")
             return
         try:
+            log.info("Confluence section start: RSS=%dMB", _rss_mb())
             conf = ConfluenceFetcher(cfg)
             spaces = cfg.confluence_spaces or conf.list_spaces()
             log.info("Syncing Confluence: %s (adaptive, max=%d)", spaces, cfg.atlassian_workers)
@@ -2203,14 +2204,19 @@ def main():
             msg = f"Repos section failed: {exc}"
             log.error(msg)
             shared_errors.append(msg)
+        finally:
+            import gc, ctypes
+            gc.collect()
+            try:
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass
 
-    for fn, name in [(_run_jira, "jira"), (_run_confluence, "confluence"), (_run_repos, "repos")]:
-        t = threading.Thread(target=fn, daemon=True, name=f"sync-{name}")
-        t.start()
-        shared_threads.append(t)
-
-    for t in shared_threads:
-        t.join()
+    # Run sections sequentially so peak RSS = max(each section) not sum(all).
+    # Each section's finally block calls gc.collect() + malloc_trim(0) to return
+    # freed pages to the OS before the next section starts.
+    for fn in [_run_jira, _run_confluence, _run_repos]:
+        fn()
 
     if shared_errors:
         log.warning("Shared sync completed with %d section error(s)", len(shared_errors))
