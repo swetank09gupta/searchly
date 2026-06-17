@@ -300,6 +300,52 @@ async def list_log_indices(customer_obj: dict) -> dict[str, Any]:
     return {"error": "No Elasticsearch URL or bastion configured for this environment."}
 
 
+async def query_kg(
+    entity_type:  str,
+    entity_id:    str,
+    searchly_url: str,
+    tenant:       str,
+    depth:        int = 3,
+) -> dict[str, Any]:
+    """
+    Traverse the knowledge graph from a given entity and return all related entities.
+
+    Use this after finding a Jira issue key or PR ID to discover:
+      - Which PRs fixed a Jira ticket     (jira_issue --[fixed_by]--> pull_request)
+      - Which service a PR touches        (pull_request --[merges_into]--> service)
+      - Which version is running per env  (deployment --[runs]--> service)
+      - Which Jira tickets a PR references (pull_request --[references]--> jira_issue)
+
+    entity_type: "jira_issue" | "pull_request" | "service" | "deployment" | "customer"
+    entity_id:   e.g. "AES-891", "pick-assist#234", "pick-assist", "sams-club-atlanta/prod"
+    depth:       how many hops to traverse (1–5, default 3)
+    """
+    headers = {"X-Tenant-ID": tenant, "X-Tenant-Tier": "SHARED"}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{searchly_url}/api/v1/kg/traverse/{entity_type}/{entity_id}",
+                params={"depth": min(depth, 5)},
+                headers=headers,
+            )
+        if resp.status_code == 200:
+            nodes = resp.json()
+            # Group by entity_type for readability
+            by_type: dict[str, list] = {}
+            for node in nodes:
+                t = node.get("entity_type", "unknown")
+                by_type.setdefault(t, []).append({
+                    "id":    node.get("entity_id"),
+                    "name":  node.get("name"),
+                    "depth": node.get("depth"),
+                })
+            return {"nodes": by_type, "total": len(nodes)}
+        return {"nodes": {}, "error": f"HTTP {resp.status_code}"}
+    except Exception as exc:
+        log.warning("query_kg failed: %s", exc)
+        return {"nodes": {}, "error": str(exc)}
+
+
 async def search_knowledge(
     query:        str,
     searchly_url: str,
@@ -345,6 +391,7 @@ TOOL_REGISTRY: dict[str, Any] = {
     "get_pod_status":       get_pod_status,
     "list_log_indices":     list_log_indices,
     "search_knowledge":     search_knowledge,
+    "query_kg":             query_kg,
 }
 
 # Ollama tool-calling schema.
@@ -464,6 +511,38 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_kg",
+            "description": (
+                "Traverse the knowledge graph from a known entity to find related entities. "
+                "Use AFTER search_knowledge returns a Jira key or PR ID to discover: "
+                "which PR fixed a ticket (jira_issue→fixed_by→pull_request), "
+                "which service a PR touches (pull_request→merges_into→service), "
+                "which version is running per env (deployment→runs→service). "
+                "This is pre-computed — use it instead of asking the LLM to guess correlations."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_type": {
+                        "type": "string",
+                        "description": "jira_issue | pull_request | service | deployment | customer",
+                    },
+                    "entity_id": {
+                        "type": "string",
+                        "description": "e.g. 'AES-891', 'pick-assist#234', 'sams-club-atlanta/prod'",
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Traversal depth 1–5. Default 3.",
+                    },
+                },
+                "required": ["entity_type", "entity_id"],
             },
         },
     },

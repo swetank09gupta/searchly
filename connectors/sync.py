@@ -379,6 +379,84 @@ def split_doc(base_doc: dict) -> list:
 # Searchly poster
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Knowledge Graph poster
+# ---------------------------------------------------------------------------
+
+class KgPoster:
+    """Posts entities and relationships to the Searchly KG API (/api/v1/kg/*)."""
+
+    def __init__(self, cfg: Config):
+        self.entity_url       = f"{cfg.searchly_url}/api/v1/kg/entity"
+        self.relationship_url = f"{cfg.searchly_url}/api/v1/kg/relationship"
+        self.headers = {
+            "Content-Type": "application/json",
+            "X-Tenant-Id":  cfg.searchly_tenant,
+            "X-User-Id":    cfg.searchly_user,
+        }
+        self.dry_run  = cfg.dry_run
+        self._ok      = 0
+        self._failed  = 0
+
+    def upsert_entity(self, entity_type: str, entity_id: str,
+                      name: str, properties: dict | None = None) -> bool:
+        if self.dry_run:
+            log.debug("[kg dry-run] entity %s/%s", entity_type, entity_id)
+            self._ok += 1
+            return True
+        try:
+            r = requests.post(self.entity_url, headers=self.headers, json={
+                "entity_type": entity_type,
+                "entity_id":   entity_id,
+                "name":        name,
+                "properties":  properties or {},
+            }, timeout=10)
+            if r.status_code in (200, 201):
+                self._ok += 1
+                return True
+            log.warning("KG entity %s/%s HTTP %d: %s", entity_type, entity_id, r.status_code, r.text[:100])
+            self._failed += 1
+            return False
+        except Exception as e:
+            log.warning("KG entity error %s/%s: %s", entity_type, entity_id, e)
+            self._failed += 1
+            return False
+
+    def upsert_relationship(self, from_type: str, from_id: str, relation: str,
+                            to_type: str, to_id: str, properties: dict | None = None) -> bool:
+        if self.dry_run:
+            log.debug("[kg dry-run] rel %s/%s -[%s]-> %s/%s", from_type, from_id, relation, to_type, to_id)
+            self._ok += 1
+            return True
+        try:
+            r = requests.post(self.relationship_url, headers=self.headers, json={
+                "from_type":  from_type,
+                "from_id":    from_id,
+                "relation":   relation,
+                "to_type":    to_type,
+                "to_id":      to_id,
+                "properties": properties or {},
+            }, timeout=10)
+            if r.status_code in (200, 201):
+                self._ok += 1
+                return True
+            log.warning("KG rel %s/%s -[%s]-> %s/%s HTTP %d", from_type, from_id, relation, to_type, to_id, r.status_code)
+            self._failed += 1
+            return False
+        except Exception as e:
+            log.warning("KG rel error: %s", e)
+            self._failed += 1
+            return False
+
+    def summary(self):
+        log.info("KG ── ok: %d  failed: %d", self._ok, self._failed)
+
+
+# Extracts a GitHub PR number from a remote link URL.
+# Handles: github.com/{org}/{repo}/pull/{number}
+_GITHUB_PR_RE = re.compile(r"github\.com/[^/]+/([^/]+)/pull/(\d+)", re.IGNORECASE)
+
+
 class SearchlyPoster:
     def __init__(self, cfg: Config):
         self.url = f"{cfg.searchly_url}/api/v1/documents"
@@ -906,6 +984,91 @@ class RepoIndexer:
         log.info("  %s: %d chunks (%s)", label, len(docs), (actual_sha or "")[:8])
         return docs, actual_sha, state_key
 
+    def sync_kg_for_repo(self, repo_name: str, org: str, kg: "KgPoster",
+                         max_prs: int = 200) -> int:
+        """
+        Fetch recently merged PRs for *repo_name* via GitHub API and upsert KG entities.
+
+        Relationships created:
+          pull_request  --[merges_into]--> service  (service = repo_name)
+          pull_request  --[references]-->  jira_issue  (parsed from PR title/body)
+
+        Called once per repo after document indexing.  Rate-limited to avoid
+        exhausting the 5000 req/h GitHub quota.
+        """
+        if not self.cfg.github_token or not org:
+            return 0
+
+        headers = {
+            "Accept":        "application/vnd.github+json",
+            "Authorization": f"Bearer {self.cfg.github_token}",
+        }
+        service_id = repo_name
+        kg.upsert_entity("service", service_id, repo_name, {"repo": repo_name})
+
+        processed = 0
+        page = 1
+        jira_key_re = re.compile(r"\b([A-Z]{2,6}-\d{2,6})\b")
+        while processed < max_prs:
+            try:
+                r = _api_get(
+                    f"https://api.github.com/repos/{org}/{repo_name}/pulls",
+                    headers=headers,
+                    params={"state": "closed", "per_page": 50, "page": page},
+                    timeout=20,
+                )
+                remaining = r.headers.get("X-RateLimit-Remaining", "999")
+                if int(remaining) < 20:
+                    log.warning("GitHub rate limit low (%s), stopping KG PR fetch", remaining)
+                    break
+                if r.status_code == 404:
+                    break
+                r.raise_for_status()
+                prs = r.json()
+            except Exception as e:
+                log.debug("KG PR fetch %s/%s: %s", org, repo_name, e)
+                break
+
+            if not prs:
+                break
+
+            for pr in prs:
+                if not pr.get("merged_at"):
+                    continue  # closed but not merged
+                pr_number = str(pr["number"])
+                pr_id     = f"{repo_name}#{pr_number}"
+                pr_title  = pr.get("title", f"PR #{pr_number}")
+                merged_sha = (pr.get("merge_commit_sha") or "")[:12]
+                base_branch = (pr.get("base") or {}).get("ref", "")
+
+                kg.upsert_entity("pull_request", pr_id, pr_title, {
+                    "repo":        repo_name,
+                    "pr_number":   pr_number,
+                    "merged_at":   pr.get("merged_at", ""),
+                    "merged_sha":  merged_sha,
+                    "base_branch": base_branch,
+                    "url":         pr.get("html_url", ""),
+                })
+                kg.upsert_relationship("pull_request", pr_id, "merges_into",
+                                       "service", service_id,
+                                       {"merged_sha": merged_sha, "branch": base_branch})
+
+                # Parse Jira keys from PR title + body to create references
+                text = f"{pr_title} {pr.get('body') or ''}"
+                for jira_key in set(jira_key_re.findall(text)):
+                    kg.upsert_entity("jira_issue", jira_key, jira_key, {})
+                    kg.upsert_relationship("pull_request", pr_id, "references",
+                                           "jira_issue", jira_key)
+
+                processed += 1
+
+            if len(prs) < 50:
+                break
+            page += 1
+
+        log.info("KG GitHub %s/%s: %d merged PRs", org, repo_name, processed)
+        return processed
+
     def _auth_url(self, url: str) -> str:
         if self.cfg.github_token and url.startswith("https://"):
             return url.replace("https://", f"https://oauth2:{self.cfg.github_token}@")
@@ -1161,6 +1324,64 @@ class CustomerDeployFetcher:
             },
         }
 
+    def sync_kg(self, kg: "KgPoster") -> None:
+        """
+        Upsert KG entities and relationships derived from deployment state.
+
+        Relationships created per environment:
+          customer --[has_env]-->    deployment
+          deployment --[runs]-->     service  (one per deployed image)
+        """
+        customer_id   = self.customer_id
+        customer_name = self.customer_name
+
+        kg.upsert_entity("customer", customer_id, customer_name, {
+            "products": self.products,
+        })
+
+        envs = self.customer.get("environments", {})
+        if not envs:
+            return
+
+        for env_name, env_cfg in envs.items():
+            bastion   = env_cfg.get("k8s_bastion", "")
+            namespace = env_cfg.get("k8s_namespace", "default")
+            context   = env_cfg.get("k8s_context", "")
+            if not bastion:
+                continue
+
+            deployment_id = f"{customer_id}/{env_name}"
+            kg.upsert_entity("deployment", deployment_id,
+                             f"{customer_name} — {env_name}", {
+                                 "customer":   customer_id,
+                                 "env":        env_name,
+                                 "namespace":  namespace,
+                             })
+            kg.upsert_relationship("customer", customer_id, "has_env",
+                                   "deployment", deployment_id)
+
+            # Fetch live version → service relationships
+            ctx_flag = f"--context={context}" if context else ""
+            cmd = (
+                f"kubectl {ctx_flag} -n {namespace} get deployments "
+                f"-o jsonpath='{{range .items[*]}}{{.metadata.name}}\t"
+                f"{{.spec.template.spec.containers[0].image}}\n{{end}}'"
+            )
+            out = self._ssh(bastion, cmd) or ""
+            for line in out.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) < 2:
+                    continue
+                svc_name = parts[0]
+                image    = parts[1]
+                version  = image.split(":")[-1] if ":" in image else "unknown"
+                svc_id   = svc_name
+                kg.upsert_entity("service", svc_id, svc_name, {})
+                kg.upsert_relationship(
+                    "deployment", deployment_id, "runs",
+                    "service", svc_id, {"version": version, "image": image},
+                )
+
     def _ssh(self, bastion: str, remote_cmd: str) -> Optional[str]:
         try:
             result = subprocess.run(
@@ -1202,6 +1423,51 @@ class JiraFetcher:
         r.raise_for_status()
         return [p["key"] for p in r.json()]
 
+    def sync_kg_for_project(self, project: str, kg: "KgPoster", since: int | None = None) -> int:
+        """
+        Fetch all issues for *project* with KG-relevant fields and upsert entities +
+        relationships into the knowledge graph.  Runs after the document sync so the
+        graph mirrors what is already indexed.
+
+        Returns the number of issues processed.
+        """
+        if since:
+            dt = time.strftime("%Y-%m-%d %H:%M", time.gmtime(since - 300))
+            jql = f'project = "{project}" AND updated >= "{dt}" ORDER BY updated DESC'
+        else:
+            jql = f'project = "{project}" ORDER BY updated DESC'
+        params: dict = {
+            "jql":        jql,
+            "maxResults": 100,
+            # issuelinks lets us detect "fixed by" links between Jira issues
+            "fields":     "summary,status,issuetype,priority,fixVersions,issuelinks",
+        }
+        processed = 0
+        while True:
+            try:
+                r = _api_get(f"{self.base}/rest/api/3/search/jql", auth=self.auth,
+                             params=params, timeout=30)
+                r.raise_for_status()
+                data = r.json()
+            except Exception as e:
+                log.warning("KG Jira fetch %s: %s", project, e)
+                break
+            batch = data.get("issues", [])
+            if not batch:
+                break
+            for issue in batch:
+                try:
+                    self.extract_kg(issue, kg)
+                    processed += 1
+                except Exception as e:
+                    log.debug("KG extract %s: %s", issue.get("key"), e)
+            next_token = data.get("nextPageToken")
+            if not next_token or processed >= self.max:
+                break
+            params = {**params, "nextPageToken": next_token}
+        log.info("KG Jira %s: %d issues processed", project, processed)
+        return processed
+
     def fetch_issues(self, project: str, since: int | None = None) -> list:
         # /rest/api/3/search was deprecated (returns 410 Gone).
         # /rest/api/3/search/jql uses cursor-based pagination via nextPageToken.
@@ -1242,6 +1508,88 @@ class JiraFetcher:
         mode = f"delta since {time.strftime('%Y-%m-%d %H:%M', time.gmtime(since))}" if since else "full"
         log.info("Jira %s: %d issues (%s)", project, len(issues), mode)
         return issues
+
+    def fetch_remote_links(self, issue_key: str) -> list[dict]:
+        """
+        Fetch Jira remote links for a single issue.
+        Returns list of {url, title, relationship} dicts.
+        Skips on HTTP error (some projects disable remote links).
+        """
+        try:
+            r = _api_get(
+                f"{self.base}/rest/api/3/issue/{issue_key}/remotelink",
+                auth=self.auth, timeout=15,
+            )
+            if r.status_code == 403 or r.status_code == 404:
+                return []
+            r.raise_for_status()
+            return [
+                {
+                    "url":          (link.get("object") or {}).get("url", ""),
+                    "title":        (link.get("object") or {}).get("title", ""),
+                    "relationship": link.get("relationship", "links to"),
+                }
+                for link in r.json()
+                if (link.get("object") or {}).get("url")
+            ]
+        except Exception as e:
+            log.debug("Remote links for %s: %s", issue_key, e)
+            return []
+
+    def extract_kg(self, issue: dict, kg: "KgPoster") -> None:
+        """
+        Upsert KG entities and relationships for one Jira issue.
+        Called after the issue document is indexed.
+
+        Relationships created:
+          jira_issue --[fixed_by]-->   pull_request  (via Jira remote links to GitHub PRs)
+          jira_issue --[contains]-->   pull_request  (via Jira issue links of type "is fixed by")
+        """
+        key = issue.get("key", "")
+        if not key:
+            return
+        f = issue.get("fields", {})
+        summary = f.get("summary", "")
+
+        # Upsert the Jira issue entity
+        kg.upsert_entity("jira_issue", key, f"[{key}] {summary}", {
+            "status":     (f.get("status") or {}).get("name", ""),
+            "issue_type": (f.get("issuetype") or {}).get("name", ""),
+            "priority":   (f.get("priority") or {}).get("name", ""),
+            "fix_versions": [v["name"] for v in f.get("fixVersions", [])],
+        })
+
+        # Remote links → GitHub PRs
+        for link in self.fetch_remote_links(key):
+            url = link["url"]
+            m = _GITHUB_PR_RE.search(url)
+            if not m:
+                continue
+            repo_name  = m.group(1)
+            pr_number  = m.group(2)
+            pr_id      = f"{repo_name}#{pr_number}"
+            pr_title   = link["title"] or f"PR #{pr_number} in {repo_name}"
+            relationship = link.get("relationship", "links to").lower()
+            # Map Jira relationship labels to canonical KG relation names
+            relation = "fixed_by" if any(w in relationship for w in ("fix", "resolv", "clos")) else "linked_to"
+            kg.upsert_entity("pull_request", pr_id, pr_title, {
+                "repo":      repo_name,
+                "pr_number": pr_number,
+                "url":       url,
+            })
+            kg.upsert_relationship("jira_issue", key, relation, "pull_request", pr_id)
+
+        # Jira issue links (e.g. "is fixed by" pointing to another issue or PR)
+        for il in (f.get("issuelinks") or []):
+            il_type = (il.get("type") or {}).get("inward", "").lower()
+            if "fix" not in il_type and "resolv" not in il_type:
+                continue
+            linked = il.get("inwardIssue") or il.get("outwardIssue") or {}
+            linked_key = linked.get("key", "")
+            if linked_key:
+                kg.upsert_entity("jira_issue", linked_key,
+                                 linked.get("fields", {}).get("summary", linked_key), {})
+                kg.upsert_relationship("jira_issue", key, "fixed_by", "jira_issue", linked_key)
 
     def _to_doc(self, issue: dict) -> Optional[dict]:
         f = issue.get("fields", {})
@@ -1493,6 +1841,7 @@ def main():
     products_cfg = load_products()
     customers = load_customers()
     poster = SearchlyPoster(cfg)
+    kg     = KgPoster(cfg)
     only = args.only
     sync_started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -1519,6 +1868,8 @@ def main():
                     docs = [part for d in jira.fetch_issues(proj, since=since)
                             for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
+                    # KG extraction: entities + remote-link relationships for each issue
+                    jira.sync_kg_for_project(proj, kg, since=since)
                     state = _load_sync_state()
                     state[f"jira_project_{proj}_completed_at"] = int(time.time())
                     _save_sync_state(state)
@@ -1555,8 +1906,20 @@ def main():
     if not only or only in ("shared", "repos"):
         if products_cfg:
             log.info("Indexing repos from products.yml ...")
-            RepoIndexer(cfg, products_cfg).index_all_products(poster)
+            repo_indexer = RepoIndexer(cfg, products_cfg)
+            repo_indexer.index_all_products(poster)
             poster.purge_stale("git", sync_started_at)
+            # KG extraction: merged PRs → service relationships via GitHub API
+            org = products_cfg.get("github_org", "")
+            if org and cfg.github_token:
+                log.info("Syncing KG for GitHub repos (%s)...", org)
+                for repo_info in repo_indexer._discover_repos():
+                    repo_name = repo_info["name"]
+                    if repo_name not in repo_indexer._skip_repos:
+                        try:
+                            repo_indexer.sync_kg_for_repo(repo_name, org, kg)
+                        except Exception as e:
+                            log.debug("KG GitHub %s/%s: %s", org, repo_name, e)
         else:
             log.info("products.yml not loaded, skipping repos.")
 
@@ -1596,15 +1959,19 @@ def main():
         total_docs = 0
         for cust in customers:
             try:
-                docs = CustomerDeployFetcher(cust, cfg).fetch_all_envs()
+                fetcher = CustomerDeployFetcher(cust, cfg)
+                docs = fetcher.fetch_all_envs()
                 if docs:
                     poster.post_batch(docs, workers=1)
                     total_docs += len(docs)
+                # KG: customer → deployment → service relationships
+                fetcher.sync_kg(kg)
             except Exception as exc:
                 log.error("Customer %s deployment fetch failed: %s", cust["id"], exc)
         log.info("Deployment state: %d docs indexed across all customers", total_docs)
 
     poster.summary()
+    kg.summary()
 
 
 if __name__ == "__main__":

@@ -117,6 +117,7 @@ def _system_prompt(customer_record: dict | None, env_config: dict | None,
             "- Use get_logs with a relevant service/keyword filter when the question is about task/order assignment.",
             "- Use get_deployment_state when asked about versions or recent deployments.",
             "- Use search_knowledge to find matching Jira bugs or doc explanations.",
+            "- When search_knowledge returns a Jira key, call query_kg(entity_type='jira_issue', entity_id='<KEY>') to find which PR fixed it and whether it is deployed.",
             "- Always say WHICH pod/log line you found the evidence in.",
             "- Cite Jira keys (AES-xxx, GM-xxx) when you know a known bug matches.",
             "- If you can't find evidence, say 'not found in logs' — don't guess.",
@@ -220,6 +221,9 @@ async def run_agent(
             fn_args.setdefault("searchly_url",   _RUNTIME["searchly_url"])
             fn_args.setdefault("tenant",         _RUNTIME["searchly_tenant"])
             fn_args.setdefault("customer_id",    customer_id)
+        elif fn_name == "query_kg":
+            fn_args.setdefault("searchly_url",   _RUNTIME["searchly_url"])
+            fn_args.setdefault("tenant",         _RUNTIME["searchly_tenant"])
         try:
             return fn_name, await fn(**fn_args)
         except Exception as e:
@@ -440,6 +444,9 @@ async def run_agent_stream(
             fn_args.setdefault("searchly_url",    _RUNTIME["searchly_url"])
             fn_args.setdefault("tenant",          _RUNTIME["searchly_tenant"])
             fn_args.setdefault("customer_id",     customer_id)
+        elif fn_name == "query_kg":
+            fn_args.setdefault("searchly_url",    _RUNTIME["searchly_url"])
+            fn_args.setdefault("tenant",          _RUNTIME["searchly_tenant"])
         try:
             return fn_name, await fn(**fn_args)
         except Exception as e:
