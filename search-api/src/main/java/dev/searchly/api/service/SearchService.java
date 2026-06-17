@@ -201,15 +201,7 @@ public class SearchService {
                 ragResult.lifecycleStage(), ragResult.lifecycleLabel(),
                 ragResult.hasLiveData(), nextCursor,
                 ragResult.retrievalTraces());
-        // Knowledge queries (no customer-specific live data) change only on connector sync (~4h).
-        // Use a 5-minute TTL instead of 60s to cut repeat Ollama calls significantly.
-        if (cacheKey != null) {
-            boolean knowledgeOnly = (customer == null || customer.isBlank())
-                    && !ragResult.hasLiveData();
-            cache.put(cacheKey, response,
-                      knowledgeOnly ? java.time.Duration.ofMinutes(5)
-                                    : java.time.Duration.ofSeconds(60));
-        }
+        if (cacheKey != null) cache.put(cacheKey, response);
         return response;
     }
 

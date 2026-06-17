@@ -99,15 +99,21 @@ class ChatHandler:
                 return result
 
         # ── Step 2: Extract entities from this message ─────────────────────
-        # If the session already has a resolved customer + env, skip the LLM extraction
-        # (~500ms Ollama call) and use the fast regex fallback instead. The LLM is only
-        # needed when we don't yet know who we're talking about.
-        session_resolved = bool(session.resolved_customer_id and session.resolved_env)
-        if session_resolved and not customer_hint and not env_hint:
-            from entity_extractor import _regex_extract
-            entities = _regex_extract(message)
-        else:
+        # Run regex first (instant). Only call the LLM (~500ms) if regex found something
+        # new — a customer or env hint that differs from the current session. This avoids
+        # the LLM call on pure follow-up turns ("what else could cause this?") while still
+        # correctly handling context switches ("what about GMI?" or "same for prod?").
+        from entity_extractor import _regex_extract
+        quick = _regex_extract(message)
+        session_customer = session.resolved_customer_id
+        session_env      = session.resolved_env
+        new_customer = quick.get("customer_hint") and quick["customer_hint"] != session_customer
+        new_env      = quick.get("env_hint")      and quick["env_hint"]      != session_env
+        needs_llm    = (not session_customer) or new_customer or new_env or customer_hint or env_hint
+        if needs_llm:
             entities = await extract_entities(message, self.ollama_url, self.ollama_model)
+        else:
+            entities = quick
 
         # URL params take precedence over extracted hints
         c_hint = customer_hint or entities.get("customer_hint")
@@ -272,14 +278,17 @@ class ChatHandler:
                 yield {"type": "done", **result}
                 return
 
-        # Step 2: Extract entities — skip LLM if session already resolved
-        session_resolved = bool(session.resolved_customer_id and session.resolved_env)
-        if session_resolved and not customer_hint and not env_hint:
-            from entity_extractor import _regex_extract
-            entities = _regex_extract(message)
-        else:
+        # Step 2: Extract entities — regex first, LLM only if something new is found
+        from entity_extractor import _regex_extract
+        quick        = _regex_extract(message)
+        new_customer = quick.get("customer_hint") and quick["customer_hint"] != session.resolved_customer_id
+        new_env      = quick.get("env_hint")      and quick["env_hint"]      != session.resolved_env
+        needs_llm    = (not session.resolved_customer_id) or new_customer or new_env or customer_hint or env_hint
+        if needs_llm:
             yield {"type": "status", "message": "Extracting entities…"}
             entities = await extract_entities(message, self.ollama_url, self.ollama_model)
+        else:
+            entities = quick
 
         c_hint = customer_hint or entities.get("customer_hint")
         e_hint = env_hint      or entities.get("env_hint")

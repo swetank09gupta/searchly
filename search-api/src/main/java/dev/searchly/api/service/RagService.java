@@ -60,9 +60,10 @@ public class RagService {
     // Virtual-thread pool for I/O-bound retrieval legs — zero OS threads blocked
     private static final ExecutorService RETRIEVAL_POOL = Executors.newVirtualThreadPerTaskExecutor();
 
-    // Queries that are already precise enough to not benefit from rewriting
-    private static final Pattern SKIP_REWRITE_RE = Pattern.compile(
-        "^[\\w\\s\\-]{1,40}$|[A-Z]{2,6}-\\d{2,6}",  // short query OR contains Jira key
+    // A query that IS just a Jira key (e.g. "AES-891") is an exact-ID lookup — rewriting
+    // would only add noise. Any free-text query, even a short one, still benefits from rewriting.
+    private static final Pattern JIRA_KEY_ONLY_RE = Pattern.compile(
+        "^[A-Z]{2,6}-\\d{2,6}$",
         Pattern.CASE_INSENSITIVE
     );
 
@@ -439,11 +440,9 @@ public class RagService {
         }, RETRIEVAL_POOL);
     }
 
-    /** Short queries and Jira-key lookups are precise enough to skip LLM rewriting. */
+    /** Only skip rewrite when the entire query is a bare Jira key — an exact-ID lookup. */
     private static boolean shouldSkipRewrite(String question) {
-        String trimmed = question.trim();
-        long wordCount = trimmed.isEmpty() ? 0 : trimmed.chars().filter(c -> c == ' ').count() + 1;
-        return wordCount <= 5 || SKIP_REWRITE_RE.matcher(trimmed).find();
+        return JIRA_KEY_ONLY_RE.matcher(question.trim()).matches();
     }
 
     /**
