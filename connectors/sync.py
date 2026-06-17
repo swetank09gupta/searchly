@@ -263,6 +263,13 @@ class _AdaptivePool:
                 self._sem.release()
 
     def map(self, fn, items: list) -> list:
+        """
+        Run fn over every item with adaptive concurrency.
+
+        Uses ThreadPoolExecutor(max_workers=self._max) so at most max_workers
+        OS threads ever exist — NOT one thread per item.  The semaphore gates
+        actual concurrency from 1 up to max_workers as CPU load allows.
+        """
         items = list(items)
         if not items:
             return []
@@ -277,10 +284,10 @@ class _AdaptivePool:
                                    name=f"pool-{self._name}-watcher")
         watcher.start()
 
-        results  = [None] * len(items)
-        threads  = []
+        results = [None] * len(items)
 
-        def _run(idx, item):
+        def _task(args):
+            idx, item = args
             self._acquire()
             try:
                 results[idx] = fn(item)
@@ -289,14 +296,10 @@ class _AdaptivePool:
             finally:
                 self._release()
 
-        for idx, item in enumerate(items):
-            t = threading.Thread(target=_run, args=(idx, item),
-                                 name=f"{self._name}-{idx}")
-            t.start()
-            threads.append(t)
-
-        for t in threads:
-            t.join()
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._max,
+                thread_name_prefix=self._name) as pool:
+            list(pool.map(_task, enumerate(items)))
 
         stop.set()
         return results
