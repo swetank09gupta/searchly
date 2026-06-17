@@ -1,6 +1,8 @@
 package dev.searchly.api.model;
 
 import jakarta.persistence.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 import java.time.Instant;
 
 @Entity
@@ -29,6 +31,7 @@ public class KgRelationshipEntity {
     @Column(name = "tenant_id", nullable = false, length = 64)
     private String tenantId;
 
+    @JdbcTypeCode(SqlTypes.JSON)
     @Column(name = "properties", nullable = false, columnDefinition = "jsonb")
     private String propertiesJson;
 
