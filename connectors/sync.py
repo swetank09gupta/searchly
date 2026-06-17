@@ -985,13 +985,17 @@ class RepoIndexer:
         return docs, actual_sha, state_key
 
     def sync_kg_for_repo(self, repo_name: str, org: str, kg: "KgPoster",
-                         max_prs: int = 200) -> int:
+                         max_prs: int = 200, since: str | None = None) -> int:
         """
-        Fetch recently merged PRs for *repo_name* via GitHub API and upsert KG entities.
+        Fetch merged PRs for *repo_name* via GitHub API and upsert KG entities.
 
         Relationships created:
           pull_request  --[merges_into]--> service  (service = repo_name)
           pull_request  --[references]-->  jira_issue  (parsed from PR title/body)
+
+        *since* is an ISO-8601 datetime string (e.g. "2024-01-15T10:00:00Z").  When
+        provided, only PRs merged after that point are fetched.  On the first KG run
+        for a repo, *since* is None so all historical PRs are backfilled.
 
         Called once per repo after document indexing.  Rate-limited to avoid
         exhausting the 5000 req/h GitHub quota.
@@ -1035,6 +1039,10 @@ class RepoIndexer:
             for pr in prs:
                 if not pr.get("merged_at"):
                     continue  # closed but not merged
+                # When backfilling incrementally, stop once we reach PRs older than cutoff
+                if since and pr["merged_at"] < since:
+                    processed = max_prs  # signal outer while to stop
+                    break
                 pr_number = str(pr["number"])
                 pr_id     = f"{repo_name}#{pr_number}"
                 pr_title  = pr.get("title", f"PR #{pr_number}")
@@ -1864,14 +1872,19 @@ def main():
                 state = _load_sync_state()
                 since = None if cfg.force else state.get(f"jira_project_{proj}_completed_at")
                 since = int(since) if since else None
+                # KG has its own timestamp — first KG run is always a full historical backfill;
+                # subsequent runs only process issues updated since the last KG completion.
+                kg_since_ts = None if cfg.force else state.get(f"kg_jira_project_{proj}_completed_at")
+                kg_since = int(kg_since_ts) if kg_since_ts else None
                 try:
                     docs = [part for d in jira.fetch_issues(proj, since=since)
                             for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
                     # KG extraction: entities + remote-link relationships for each issue
-                    jira.sync_kg_for_project(proj, kg, since=since)
+                    jira.sync_kg_for_project(proj, kg, since=kg_since)
                     state = _load_sync_state()
                     state[f"jira_project_{proj}_completed_at"] = int(time.time())
+                    state[f"kg_jira_project_{proj}_completed_at"] = int(time.time())
                     _save_sync_state(state)
                 except Exception as e:
                     log.error("Jira %s: %s", proj, e)
@@ -1917,7 +1930,19 @@ def main():
                     repo_name = repo_info["name"]
                     if repo_name not in repo_indexer._skip_repos:
                         try:
-                            repo_indexer.sync_kg_for_repo(repo_name, org, kg)
+                            # KG has its own per-repo timestamp independent of git indexing.
+                            # First KG run = full historical backfill (no since); subsequent
+                            # runs pass an ISO datetime so only newly merged PRs are fetched.
+                            kg_state = _load_sync_state()
+                            kg_repo_ts = None if cfg.force else kg_state.get(f"kg_github_repo_{repo_name}_completed_at")
+                            kg_repo_since = (
+                                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(kg_repo_ts)))
+                                if kg_repo_ts else None
+                            )
+                            repo_indexer.sync_kg_for_repo(repo_name, org, kg, since=kg_repo_since)
+                            kg_state = _load_sync_state()
+                            kg_state[f"kg_github_repo_{repo_name}_completed_at"] = int(time.time())
+                            _save_sync_state(kg_state)
                         except Exception as e:
                             log.debug("KG GitHub %s/%s: %s", org, repo_name, e)
         else:
