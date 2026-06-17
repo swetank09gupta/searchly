@@ -191,6 +191,116 @@ class _RateLimiter:
 _ATLASSIAN_RL = _RateLimiter(7)   # Atlassian Cloud: ~7 req/s per token
 _GITHUB_RL    = _RateLimiter(5)   # GitHub: ~5 req/s (conservative)
 
+# CPU thresholds (as fraction of core count via os.getloadavg()[0] / ncpu).
+# Override with env vars if the VM's services have a different baseline load.
+_CPU_HIGH = float(os.environ.get("SYNC_CPU_HIGH", "0.80"))  # load/cores above → shed a worker
+_CPU_LOW  = float(os.environ.get("SYNC_CPU_LOW",  "0.55"))  # load/cores below → add a worker
+
+
+class _AdaptivePool:
+    """
+    Adaptive concurrency pool using os.getloadavg() (no extra deps).
+
+    Starts at 1 worker.  A background thread samples CPU load every
+    POLL_S seconds and adjusts the active slot count:
+      - load/cores > cpu_high → reduce by 1 (down to min=1)
+      - load/cores < cpu_low  → increase by 1 (up to max_workers)
+
+    Mechanics:
+      Increasing — release() on the semaphore immediately adds a slot.
+      Decreasing — increment a drain counter; the next worker that
+                   finishes absorbs its slot without returning it.
+    This means a reduction takes effect as soon as one in-flight task
+    completes, without interrupting running work.
+
+    API rate limiters (_ATLASSIAN_RL / _GITHUB_RL) still cap throughput
+    regardless of how many workers are running, so over-provisioning
+    workers just means they queue behind the rate limiter — harmless.
+    """
+
+    POLL_S = 8.0   # CPU sample interval
+
+    def __init__(self, name: str, max_workers: int = 8,
+                 cpu_high: float = _CPU_HIGH, cpu_low: float = _CPU_LOW):
+        self._name      = name
+        self._max       = max_workers
+        self._cpu_high  = cpu_high
+        self._cpu_low   = cpu_low
+        self._ncpu      = max(os.cpu_count() or 1, 1)
+        self._target    = 1
+        self._sem       = threading.Semaphore(1)   # starts at 1 slot
+        self._drain     = 0
+        self._lock      = threading.Lock()
+
+    def _cpu_load(self) -> float:
+        try:
+            return os.getloadavg()[0] / self._ncpu
+        except (AttributeError, OSError):
+            return 0.5   # Windows / unknown — assume mid
+
+    def _adjust(self) -> None:
+        load = self._cpu_load()
+        with self._lock:
+            if load > self._cpu_high and self._target > 1:
+                self._target -= 1
+                self._drain  += 1
+                log.info("AdaptivePool[%s]: load=%.0f%% → %d workers",
+                         self._name, load * 100, self._target)
+            elif load < self._cpu_low and self._target < self._max:
+                self._target += 1
+                self._sem.release()   # slot available immediately
+                log.info("AdaptivePool[%s]: load=%.0f%% → %d workers",
+                         self._name, load * 100, self._target)
+
+    def _acquire(self) -> None:
+        self._sem.acquire()
+
+    def _release(self) -> None:
+        with self._lock:
+            if self._drain > 0:
+                self._drain -= 1   # absorb slot — do not put it back
+            else:
+                self._sem.release()
+
+    def map(self, fn, items: list) -> list:
+        items = list(items)
+        if not items:
+            return []
+
+        stop = threading.Event()
+
+        def _watch():
+            while not stop.wait(self.POLL_S):
+                self._adjust()
+
+        watcher = threading.Thread(target=_watch, daemon=True,
+                                   name=f"pool-{self._name}-watcher")
+        watcher.start()
+
+        results  = [None] * len(items)
+        threads  = []
+
+        def _run(idx, item):
+            self._acquire()
+            try:
+                results[idx] = fn(item)
+            except Exception as exc:
+                log.error("AdaptivePool[%s] item %d failed: %s", self._name, idx, exc)
+            finally:
+                self._release()
+
+        for idx, item in enumerate(items):
+            t = threading.Thread(target=_run, args=(idx, item),
+                                 name=f"{self._name}-{idx}")
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join()
+
+        stop.set()
+        return results
+
 
 # ---------------------------------------------------------------------------
 # Branch filtering + customer-env discovery
@@ -783,10 +893,8 @@ class RepoIndexer:
                 if docs:
                     poster.post_batch(docs, workers=self.cfg.batch_size)
 
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers,
-                thread_name_prefix="git") as pool:
-            list(pool.map(_index_one_repo, sorted(work.items())))
+        _AdaptivePool("git", max_workers=workers).map(
+            _index_one_repo, sorted(work.items()))
 
         # ── Step 4: DevOps / deployment repos ────────────────────────────────────
         if self.cfg.devops_repos:
@@ -1917,7 +2025,7 @@ def main():
         if cfg.jira_url and cfg.jira_token:
             jira = JiraFetcher(cfg)
             projects = cfg.jira_projects or jira.list_projects()
-            log.info("Syncing Jira: %s (workers=%d)", projects, cfg.atlassian_workers)
+            log.info("Syncing Jira: %s (adaptive, max=%d)", projects, cfg.atlassian_workers)
 
             def _sync_jira_project(proj: str) -> None:
                 state = _load_sync_state()
@@ -1936,10 +2044,8 @@ def main():
                 except Exception as e:
                     log.error("Jira %s: %s", proj, e)
 
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=cfg.atlassian_workers,
-                    thread_name_prefix="jira") as pool:
-                list(pool.map(_sync_jira_project, projects))
+            _AdaptivePool("jira", max_workers=cfg.atlassian_workers).map(
+                _sync_jira_project, projects)
 
             poster.purge_stale("jira", sync_started_at)
         else:
@@ -1950,7 +2056,7 @@ def main():
         if cfg.confluence_url and cfg.confluence_token:
             conf = ConfluenceFetcher(cfg)
             spaces = cfg.confluence_spaces or conf.list_spaces()
-            log.info("Syncing Confluence: %s (workers=%d)", spaces, cfg.atlassian_workers)
+            log.info("Syncing Confluence: %s (adaptive, max=%d)", spaces, cfg.atlassian_workers)
 
             def _sync_confluence_space(space: str) -> None:
                 state = _load_sync_state()
@@ -1964,10 +2070,8 @@ def main():
                 except Exception as e:
                     log.error("Confluence %s: %s", space, e)
 
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=cfg.atlassian_workers,
-                    thread_name_prefix="confluence") as pool:
-                list(pool.map(_sync_confluence_space, spaces))
+            _AdaptivePool("confluence", max_workers=cfg.atlassian_workers).map(
+                _sync_confluence_space, spaces)
 
             poster.purge_stale("confluence", sync_started_at)
         else:
@@ -2003,10 +2107,8 @@ def main():
                     except Exception as e:
                         log.debug("KG GitHub %s/%s: %s", org, repo_name, e)
 
-                with concurrent.futures.ThreadPoolExecutor(
-                        max_workers=cfg.github_workers,
-                        thread_name_prefix="kg-gh") as pool:
-                    list(pool.map(_sync_kg_repo, repos_for_kg))
+                _AdaptivePool("kg-gh", max_workers=cfg.github_workers).map(
+                    _sync_kg_repo, repos_for_kg)
         else:
             log.info("products.yml not loaded, skipping repos.")
 
