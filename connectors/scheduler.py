@@ -41,6 +41,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -108,7 +109,11 @@ def run():
     log.info("Waiting %ds for services to settle before first sync...", STARTUP_WAIT_S)
     time.sleep(STARTUP_WAIT_S)
 
-    # ── Initial runs ──────────────────────────────────────────────────────────
+    # ── Initial shared sync — runs in background so the scheduler loop
+    #    starts immediately and deploy-state refreshes keep ticking.
+    # ─────────────────────────────────────────────────────────────────
+    _shared_running = threading.Event()
+
     ago = _last_shared_completed_ago()
     if ago is not None and ago < FULL_INTERVAL_S:
         log.info(
@@ -118,8 +123,15 @@ def run():
             FULL_INTERVAL_S // 3600,
         )
     else:
-        log.info("=== INITIAL: Full shared sync (Jira + Confluence + repos) ===")
-        _run("shared", "--only", "shared")
+        log.info("=== INITIAL: Full shared sync starting in background thread ===")
+        _shared_running.set()
+
+        def _bg_shared():
+            _run("shared", "--only", "shared")
+            _shared_running.clear()
+            log.info("=== INITIAL: Full shared sync complete ===")
+
+        threading.Thread(target=_bg_shared, daemon=True, name="initial-shared").start()
 
     log.info("=== INITIAL: Deployment state (all customers, all envs) ===")
     _run("deploy", "--only", "all-customers-deploy")
@@ -147,9 +159,13 @@ def run():
             last_deploy = time.monotonic()
 
         if now - last_full >= FULL_INTERVAL_S:
-            log.info("=== Full shared sync ===")
-            _run("shared", "--only", "shared")
-            last_full = time.monotonic()
+            if _shared_running.is_set():
+                log.info("=== Skipping scheduled full sync — initial sync still running ===")
+                last_full = time.monotonic()  # push the timer out by another interval
+            else:
+                log.info("=== Full shared sync ===")
+                _run("shared", "--only", "shared")
+                last_full = time.monotonic()
 
 
 if __name__ == "__main__":
