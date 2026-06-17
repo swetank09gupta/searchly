@@ -2020,9 +2020,22 @@ def main():
         GitHubDiscovery(org, cfg.github_token).print_repos()
         return
 
-    # ── Jira ──────────────────────────────────────────────────────────────
-    if not only or only in ("shared", "jira"):
-        if cfg.jira_url and cfg.jira_token:
+    # ── Jira + Confluence + Repos — all three run in parallel ─────────────
+    # Each section has its own adaptive pool (starts at 1 worker, scales with
+    # CPU load).  Atlassian sections share _ATLASSIAN_RL (7 req/s cap across
+    # both); GitHub sections share _GITHUB_RL (5 req/s cap).
+    # Running in parallel means a slow Confluence full-fetch no longer blocks
+    # GitHub repo indexing from starting.
+    shared_threads: list[threading.Thread] = []
+    shared_errors:  list[str] = []
+
+    def _run_jira() -> None:
+        if not (only is None or only in ("shared", "jira")):
+            return
+        if not (cfg.jira_url and cfg.jira_token):
+            log.info("Jira not configured, skipping.")
+            return
+        try:
             jira = JiraFetcher(cfg)
             projects = cfg.jira_projects or jira.list_projects()
             log.info("Syncing Jira: %s (adaptive, max=%d)", projects, cfg.atlassian_workers)
@@ -2046,14 +2059,19 @@ def main():
 
             _AdaptivePool("jira", max_workers=cfg.atlassian_workers).map(
                 _sync_jira_project, projects)
-
             poster.purge_stale("jira", sync_started_at)
-        else:
-            log.info("Jira not configured, skipping.")
+        except Exception as exc:
+            msg = f"Jira section failed: {exc}"
+            log.error(msg)
+            shared_errors.append(msg)
 
-    # ── Confluence ────────────────────────────────────────────────────────
-    if not only or only in ("shared", "confluence"):
-        if cfg.confluence_url and cfg.confluence_token:
+    def _run_confluence() -> None:
+        if not (only is None or only in ("shared", "confluence")):
+            return
+        if not (cfg.confluence_url and cfg.confluence_token):
+            log.info("Confluence not configured, skipping.")
+            return
+        try:
             conf = ConfluenceFetcher(cfg)
             spaces = cfg.confluence_spaces or conf.list_spaces()
             log.info("Syncing Confluence: %s (adaptive, max=%d)", spaces, cfg.atlassian_workers)
@@ -2072,32 +2090,38 @@ def main():
 
             _AdaptivePool("confluence", max_workers=cfg.atlassian_workers).map(
                 _sync_confluence_space, spaces)
-
             poster.purge_stale("confluence", sync_started_at)
-        else:
-            log.info("Confluence not configured, skipping.")
+        except Exception as exc:
+            msg = f"Confluence section failed: {exc}"
+            log.error(msg)
+            shared_errors.append(msg)
 
-    # ── Repos ─────────────────────────────────────────────────────────────
-    if not only or only in ("shared", "repos"):
-        if products_cfg:
-            log.info("Indexing repos from products.yml (workers=%d) ...", cfg.github_workers)
+    def _run_repos() -> None:
+        if not (only is None or only in ("shared", "repos")):
+            return
+        if not products_cfg:
+            log.info("products.yml not loaded, skipping repos.")
+            return
+        try:
+            log.info("Indexing repos from products.yml (adaptive, max=%d) ...", cfg.github_workers)
             repo_indexer = RepoIndexer(cfg, products_cfg)
             repo_indexer.index_all_products(poster, workers=cfg.github_workers)
             poster.purge_stale("git", sync_started_at)
-            # KG extraction: merged PRs → service relationships via GitHub API
+
             org = products_cfg.get("github_org", "")
             if org and cfg.github_token:
                 repos_for_kg = [
                     r["name"] for r in repo_indexer._discover_repos()
                     if r["name"] not in repo_indexer._skip_repos
                 ]
-                log.info("Syncing KG for %d GitHub repos (%s) workers=%d",
+                log.info("Syncing KG for %d GitHub repos (%s, adaptive, max=%d)",
                          len(repos_for_kg), org, cfg.github_workers)
 
                 def _sync_kg_repo(repo_name: str) -> None:
                     try:
                         kg_state = _load_sync_state()
-                        kg_repo_ts = None if cfg.force else kg_state.get(f"kg_github_repo_{repo_name}_completed_at")
+                        kg_repo_ts = None if cfg.force else kg_state.get(
+                            f"kg_github_repo_{repo_name}_completed_at")
                         kg_repo_since = (
                             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(kg_repo_ts)))
                             if kg_repo_ts else None
@@ -2109,15 +2133,26 @@ def main():
 
                 _AdaptivePool("kg-gh", max_workers=cfg.github_workers).map(
                     _sync_kg_repo, repos_for_kg)
-        else:
-            log.info("products.yml not loaded, skipping repos.")
+        except Exception as exc:
+            msg = f"Repos section failed: {exc}"
+            log.error(msg)
+            shared_errors.append(msg)
+
+    for fn, name in [(_run_jira, "jira"), (_run_confluence, "confluence"), (_run_repos, "repos")]:
+        t = threading.Thread(target=fn, daemon=True, name=f"sync-{name}")
+        t.start()
+        shared_threads.append(t)
+
+    for t in shared_threads:
+        t.join()
+
+    if shared_errors:
+        log.warning("Shared sync completed with %d section error(s)", len(shared_errors))
 
     # Stamp completion time so the scheduler can skip a redundant re-run on
     # container restart if the last full sync finished within the interval.
     if only in ("shared", None):
-        state = _load_sync_state()
-        state["last_shared_completed_at"] = int(time.time())
-        _save_sync_state(state)
+        _update_state("last_shared_completed_at", int(time.time()))
 
     # ── Deployment state: single customer, all envs ───────────────────────
     if only == "customer":
