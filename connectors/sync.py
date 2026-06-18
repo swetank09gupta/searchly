@@ -958,12 +958,49 @@ class RepoIndexer:
         """
         Return all branches in a remote repo as (branch_name, sha) tuples,
         excluding noise branches (feature/*, dev/*, dependabot/*, etc.).
-        Used for DevOps repos where every non-noise branch may be a customer env.
+        Uses GitHub REST API instead of git ls-remote to avoid subprocess
+        overhead on repos with thousands of branches.
         """
+        import re as _re
+        # Parse org/repo from auth_url
+        _m = _re.search(r"github\.com[:/](.+?)/([^/.]+?)(?:\.git)?$", auth_url)
+        if _m and self.cfg.github_token:
+            org, repo = _m.group(1), _m.group(2)
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {self.cfg.github_token}",
+            }
+            results = []
+            page = 1
+            while True:
+                try:
+                    resp = requests.get(
+                        f"https://api.github.com/repos/{org}/{repo}/branches",
+                        params={"per_page": 100, "page": page},
+                        headers=headers, timeout=30,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if not data:
+                        break
+                    for b in data:
+                        name = b["name"]
+                        sha = b["commit"]["sha"]
+                        if not _NOISE_BRANCH_RE.match(name):
+                            results.append((name, sha))
+                    if len(data) < 100:
+                        break
+                    page += 1
+                except Exception as exc:
+                    log.warning("GitHub branches API failed (page %d): %s", page, exc)
+                    break
+            return results
+
+        # Fallback: git ls-remote --heads (slow for large repos)
         try:
             r = subprocess.run(
                 ["git", "ls-remote", "--heads", auth_url],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=60
             )
             if r.returncode != 0:
                 return []
@@ -1025,7 +1062,7 @@ class RepoIndexer:
             # Index every non-noise branch + auto-register customers
             branches = self._list_all_branches(auth_url)
             log.info("DevOps repo %s: %d non-noise branches", repo_name, len(branches))
-            for branch_name, _ in branches:
+            for branch_name, branch_sha in branches:
                 parsed = _parse_customer_branch(branch_name)
                 if parsed and agent_url:
                     customer_id, env = parsed
@@ -1033,7 +1070,8 @@ class RepoIndexer:
 
                 new_sha, state_key = self._index_repo(
                     clone_url, repo_name, "devops",
-                    exts=self.include_exts, branch=branch_name, poster=poster
+                    exts=self.include_exts, branch=branch_name, poster=poster,
+                    known_sha=branch_sha,
                 )
                 if new_sha:
                     _update_state(state_key, new_sha)
@@ -1093,7 +1131,8 @@ class RepoIndexer:
     def _index_repo(self, clone_url: str, repo_name: str, product: str,
                     exts: set | None = None,
                     branch: str | None = None,
-                    poster=None) -> tuple[str | None, str]:
+                    poster=None,
+                    known_sha: str | None = None) -> tuple[str | None, str]:
         """
         Clone a repo (or a specific branch), stream-walk files, post in batches.
 
@@ -1114,7 +1153,9 @@ class RepoIndexer:
 
         # ── Incremental check ──────────────────────────────────────────────
         if not self.cfg.force:
-            remote_sha = self._remote_sha(auth_url, branch)
+            # Use caller-supplied SHA when available (avoids a git ls-remote round-trip
+            # per branch — critical for devops repos with thousands of branches).
+            remote_sha = known_sha or self._remote_sha(auth_url, branch)
             if remote_sha and self._sync_state.get(state_key) == remote_sha:
                 log.info("  %s: unchanged (%s), skipping", label, remote_sha[:8])
                 return None, state_key
