@@ -1204,69 +1204,74 @@ class RepoIndexer:
         total = 0
         batch: list = []
         try:
-            with _tarfile.open(fileobj=resp.raw, mode="r|gz") as tar:
-                for member in tar:
-                    if not member.isfile():
-                        continue
-                    # Strip top-level directory: {org}-{repo}-{sha}/path/to/file
-                    _parts = member.name.split("/", 1)
-                    if len(_parts) < 2:
-                        continue
-                    rel = _parts[1]
-                    if not rel:
-                        continue
-
-                    suffix = Path(rel).suffix.lower()
-                    if suffix not in exts:
-                        continue
-                    if member.size > self.max_file_kb * 1024:
-                        continue
-                    if any(part in _skip_dirs for part in rel.split("/")):
-                        continue
-
-                    try:
-                        _f = tar.extractfile(member)
-                        if _f is None:
+            # Use resp as context manager so the TCP connection (and its kernel socket
+            # receive buffer) is released immediately after tarfile finishes. Without
+            # this, stream=True responses leave the socket open, and 2935 orphaned
+            # sockets × their pre-fetched buffers = several GiB of cgroup memory.
+            with resp:
+                with _tarfile.open(fileobj=resp.raw, mode="r|gz") as tar:
+                    for member in tar:
+                        if not member.isfile():
                             continue
-                        text = _f.read().decode("utf-8", errors="replace")
-                        _f.close()
-                        del _f
+                        # Strip top-level directory: {org}-{repo}-{sha}/path/to/file
+                        _parts = member.name.split("/", 1)
+                        if len(_parts) < 2:
+                            continue
+                        rel = _parts[1]
+                        if not rel:
+                            continue
 
-                        dt = self._doc_type(rel)
-                        if dt:
-                            chunks = ([text] if len(text) < 12000
-                                      else [text[i:i + 6000] for i in range(0, len(text), 6000)])
-                        else:
-                            chunks = self._chunk_code(text, suffix)
-                        del text
+                        suffix = Path(rel).suffix.lower()
+                        if suffix not in exts:
+                            continue
+                        if member.size > self.max_file_kb * 1024:
+                            continue
+                        if any(part in _skip_dirs for part in rel.split("/")):
+                            continue
 
-                        for i, chunk in enumerate(chunks):
-                            meta: dict = {
-                                "source":    "git",
-                                "source_id": f"{repo_name}:{rel}",
-                                "product":   product,
-                                "repo":      repo_name,
-                                "file_path": rel,
-                                "language":  _lang(suffix),
-                                "chunk_index": i,
-                            }
-                            if branch:
-                                meta["branch"] = branch
+                        try:
+                            _f = tar.extractfile(member)
+                            if _f is None:
+                                continue
+                            text = _f.read().decode("utf-8", errors="replace")
+                            _f.close()
+                            del _f
+
+                            dt = self._doc_type(rel)
                             if dt:
-                                meta["doc_type"] = dt
-                            branch_label = f"@{branch}" if branch else ""
-                            batch.append({
-                                "title": f"[{product}/{repo_name}{branch_label}] {rel}"
-                                         + (f" (part {i+1})" if len(chunks) > 1 else ""),
-                                "content": chunk,
-                                "metadata": meta,
-                            })
-                            if len(batch) >= 50 and poster:
-                                poster.post_batch(batch, workers=self.cfg.batch_size)
-                                batch.clear()
-                            total += 1
-                    except Exception as e:
-                        log.debug("Skip %s: %s", rel, e)
+                                chunks = ([text] if len(text) < 12000
+                                          else [text[i:i + 6000] for i in range(0, len(text), 6000)])
+                            else:
+                                chunks = self._chunk_code(text, suffix)
+                            del text
+
+                            for i, chunk in enumerate(chunks):
+                                meta: dict = {
+                                    "source":    "git",
+                                    "source_id": f"{repo_name}:{rel}",
+                                    "product":   product,
+                                    "repo":      repo_name,
+                                    "file_path": rel,
+                                    "language":  _lang(suffix),
+                                    "chunk_index": i,
+                                }
+                                if branch:
+                                    meta["branch"] = branch
+                                if dt:
+                                    meta["doc_type"] = dt
+                                branch_label = f"@{branch}" if branch else ""
+                                batch.append({
+                                    "title": f"[{product}/{repo_name}{branch_label}] {rel}"
+                                             + (f" (part {i+1})" if len(chunks) > 1 else ""),
+                                    "content": chunk,
+                                    "metadata": meta,
+                                })
+                                if len(batch) >= 50 and poster:
+                                    poster.post_batch(batch, workers=self.cfg.batch_size)
+                                    batch.clear()
+                                total += 1
+                        except Exception as e:
+                            log.debug("Skip %s: %s", rel, e)
         except Exception as e:
             log.error("Tarball stream error for %s: %s", label, e)
             return None, state_key
