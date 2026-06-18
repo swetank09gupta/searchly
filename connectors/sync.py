@@ -1121,80 +1121,126 @@ class RepoIndexer:
         else:
             remote_sha = None
 
-        # ── Clone ──────────────────────────────────────────────────────────
+        # ── Fetch via GitHub API tarball (no git clone, no disk, no page cache) ──
+        # git clone writes all files to overlayfs where posix_fadvise(DONTNEED)
+        # is silently ignored — page cache grows to 20+ GB on large repos and
+        # OOMs the container. Streaming the tarball through memory processes one
+        # file at a time with no disk writes and zero page cache growth.
+        import tarfile as _tarfile
+        import requests as _req
+
         def _rss() -> int:
             try:
                 return int(Path("/proc/self/status").read_text().split("VmRSS:")[1].split()[0]) // 1024
             except Exception:
                 return 0
 
-        with tempfile.TemporaryDirectory() as tmp:
-            clone_cmd = ["git", "clone", "--depth=1", "--single-branch"]
-            if branch:
-                clone_cmd += ["--branch", branch]
-            clone_cmd += [auth_url, tmp]
+        # Parse org from clone_url: https://github.com/org/repo[.git]
+        _url_parts = clone_url.rstrip("/").removesuffix(".git").split("/")
+        _org = _url_parts[-2] if len(_url_parts) >= 2 else (self.github_org or "")
+        _ref = branch or "HEAD"
+        tarball_url = f"https://api.github.com/repos/{_org}/{repo_name}/tarball/{_ref}"
+        _headers: dict = {"Accept": "application/vnd.github+json"}
+        if self.cfg.github_token:
+            _headers["Authorization"] = f"Bearer {self.cfg.github_token}"
 
-            rss_before = _rss()
-            log.info("Cloning %s ... (RSS=%dMB)", label, rss_before)
-            result = subprocess.run(
-                clone_cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=180,
-            )
-            rss_after_clone = _rss()
-            log.info("  %s: clone done RSS=%dMB (+%dMB)", label, rss_after_clone, rss_after_clone - rss_before)
-            if result.returncode != 0:
-                log.error("Clone failed for %s: %s", label, result.stderr[:200])
-                return None, state_key
+        rss_before = _rss()
+        log.info("Fetching %s tarball ... (RSS=%dMB)", label, rss_before)
+        try:
+            resp = _req.get(tarball_url, headers=_headers, stream=True,
+                            timeout=300, allow_redirects=True)
+            resp.raise_for_status()
+        except Exception as e:
+            log.error("Tarball fetch failed for %s: %s", label, e)
+            return None, state_key
 
-            # Actual SHA after clone (more reliable than ls-remote for default branch)
-            head_result = subprocess.run(
-                ["git", "-C", tmp, "rev-parse", "HEAD"],
-                capture_output=True, text=True
-            )
-            actual_sha = head_result.stdout.strip() if head_result.returncode == 0 else remote_sha
+        # actual_sha: GitHub includes {org}-{repo}-{short_sha} as the top dir name;
+        # fall back to remote_sha if we can't parse it.
+        actual_sha = remote_sha
+        _skip_dirs = {".git", "__pycache__", "node_modules", ".gradle",
+                      "target", "build", "dist", ".idea", ".vscode", "venv"}
 
-            # git clone loads every repo file into page cache. Evict all of it now
-            # so the cache is near-zero before the walk begins. Opening a file
-            # without reading and calling posix_fadvise(DONTNEED) evicts the
-            # kernel-cached pages that git wrote — no additional I/O required.
-            import os as _os
-            _libc_ok = hasattr(_os, "posix_fadvise")
-            if _libc_ok:
-                for _p in Path(tmp).rglob("*"):
-                    if _p.is_file():
-                        try:
-                            with open(_p, "rb") as _f:
-                                _os.posix_fadvise(_f.fileno(), 0, 0, _os.POSIX_FADV_DONTNEED)
-                        except OSError:
-                            pass
-            rss_post_evict = _rss()
-            log.info("  %s: post-clone cache evict RSS=%dMB", label, rss_post_evict)
+        total = 0
+        batch: list = []
+        try:
+            with _tarfile.open(fileobj=resp.raw, mode="r|gz") as tar:
+                for member in tar:
+                    if not member.isfile():
+                        continue
+                    # Strip top-level directory: {org}-{repo}-{sha}/path/to/file
+                    _parts = member.name.split("/", 1)
+                    if len(_parts) < 2:
+                        continue
+                    rel = _parts[1]
+                    if not rel:
+                        continue
 
-            # Stream walk: post in batches of 50 so peak memory = one batch, not full repo
-            total = 0
-            batch: list = []
-            for doc in self._walk(tmp, repo_name, product, exts=exts, branch=branch):
-                batch.append(doc)
-                if len(batch) >= 50 and poster:
-                    poster.post_batch(batch, workers=self.cfg.batch_size)
-                    batch.clear()
-                total += 1
-            if batch and poster:
-                poster.post_batch(batch, workers=self.cfg.batch_size)
-                batch.clear()
+                    suffix = Path(rel).suffix.lower()
+                    if suffix not in exts:
+                        continue
+                    if member.size > self.max_file_kb * 1024:
+                        continue
+                    if any(part in _skip_dirs for part in rel.split("/")):
+                        continue
 
-            rss_after_walk = _rss()
-            log.info("  %s: walk done %d chunks RSS=%dMB (+%dMB)", label, total, rss_after_walk, rss_after_walk - rss_after_clone)
+                    try:
+                        _f = tar.extractfile(member)
+                        if _f is None:
+                            continue
+                        text = _f.read().decode("utf-8", errors="replace")
+                        _f.close()
+                        del _f
+
+                        dt = self._doc_type(rel)
+                        if dt:
+                            chunks = ([text] if len(text) < 12000
+                                      else [text[i:i + 6000] for i in range(0, len(text), 6000)])
+                        else:
+                            chunks = self._chunk_code(text, suffix)
+                        del text
+
+                        for i, chunk in enumerate(chunks):
+                            meta: dict = {
+                                "source":    "git",
+                                "source_id": f"{repo_name}:{rel}",
+                                "product":   product,
+                                "repo":      repo_name,
+                                "file_path": rel,
+                                "language":  _lang(suffix),
+                                "chunk_index": i,
+                            }
+                            if branch:
+                                meta["branch"] = branch
+                            if dt:
+                                meta["doc_type"] = dt
+                            branch_label = f"@{branch}" if branch else ""
+                            batch.append({
+                                "title": f"[{product}/{repo_name}{branch_label}] {rel}"
+                                         + (f" (part {i+1})" if len(chunks) > 1 else ""),
+                                "content": chunk,
+                                "metadata": meta,
+                            })
+                            if len(batch) >= 50 and poster:
+                                poster.post_batch(batch, workers=self.cfg.batch_size)
+                                batch.clear()
+                            total += 1
+                    except Exception as e:
+                        log.debug("Skip %s: %s", rel, e)
+        except Exception as e:
+            log.error("Tarball stream error for %s: %s", label, e)
+            return None, state_key
+
+        if batch and poster:
+            poster.post_batch(batch, workers=self.cfg.batch_size)
+            batch.clear()
 
         try:
             import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
         except Exception:
             pass
         rss_final = _rss()
-        log.info("  %s: %d chunks (%s) RSS=%dMB (total +%dMB)", label, total, (actual_sha or "")[:8], rss_final, rss_final - rss_before)
+        log.info("  %s: %d chunks (%s) RSS=%dMB (total +%dMB)",
+                 label, total, (actual_sha or "")[:8], rss_final, rss_final - rss_before)
         return actual_sha, state_key
 
     def sync_kg_for_repo(self, repo_name: str, org: str, kg: "KgPoster",
