@@ -77,7 +77,7 @@ User Query
 
 ## Indexing Pipeline
 1. Search API: generate UUID → Postgres `PENDING` → MinIO → Kafka publish → 202 response
-2. Indexer: content fingerprint check (SHA-256) → skip chunk re-embed if unchanged → write full doc to `documents-*` → chunk (1500 chars, 200 overlap, sentence-aware) → batch embed (50/request) → write to `chunks-*` with `embedding_version`
+2. Indexer: content fingerprint check (SHA-256) → skip chunk re-embed if unchanged → write full doc to `documents-*` → chunk (2000 chars, 200 overlap, sentence-aware) → batch embed (50/request) → write to `chunks-*` with `embedding_version`
 3. `doc_id` = OpenSearch `_id` → upsert semantics → safe Kafka replay
 4. Bulk indexing: up to 500 docs per `/_bulk` request
 
@@ -203,7 +203,7 @@ Roles are JWT claims, enforced via Spring `@PreAuthorize` + `TenantSecurityFilte
 ## Connectors
 - **Jira**: JQL cursor pagination, max 1000 issues/project. **Delta sync**: second run onwards adds `AND updated >= last_completed_at` to JQL. First run: full fetch. **Parallel**: `SYNC_ATLASSIAN_WORKERS` workers (default 3) process projects concurrently; shared `_ATLASSIAN_RL` rate-limiter (7 req/s) caps combined throughput.
 - **Confluence**: recursive page fetch (depth ≤8), HTML stripped. **Delta sync**: second run onwards uses CQL search API (`lastModified >= last_completed_at`) — flat result, no recursive walk needed. First run: full recursive fetch. **Parallel**: same `SYNC_ATLASSIAN_WORKERS` workers and rate-limiter as Jira.
-- **GitHub**: language-aware chunking (Python=AST, Java=regex, fallback=2000-char text); ADR/architecture files kept whole (<12K). Incremental via `git ls-remote` SHA check — unchanged repos skipped entirely. **Parallel**: `SYNC_GITHUB_WORKERS` workers (default 4) clone/index repos concurrently; shared `_GITHUB_RL` rate-limiter (5 req/s).
+- **GitHub**: language-aware chunking (Python=AST, Java=regex, fallback=2000-char text); ADR/architecture files kept whole (<12K). Incremental via GitHub REST API branch listing (100/page) + SHA comparison — unchanged repos skipped entirely. **No git clone**: uses `GET /repos/{org}/{repo}/tarball/{ref}` with streaming decompression (`tarfile.open(mode="r|gz")`) — no disk writes, no page cache growth. Branch SHAs from the listing API are passed as `known_sha` to skip the per-branch `git ls-remote` call. **Parallel**: `SYNC_GITHUB_WORKERS` workers (default **1** in production to bound peak memory); shared `_GITHUB_RL` rate-limiter (5 req/s). **DevOps repos** (`greymatter-deployment` etc.) have 2000+ branches — each branch is one tarball fetch; tarball is streamed and discarded, not stored.
 - **Sync schedule**: Track A (60min) — deployment state; Track B (4h) — Jira + Confluence + repos
 - **State**: `.sync_state.json` on Docker volume. Keys: git repo SHAs, `jira_project_{KEY}_completed_at`, `confluence_space_{KEY}_completed_at`, `kg_jira_project_{KEY}_completed_at`, `kg_github_repo_{REPO}_completed_at`, `last_shared_completed_at` (epoch seconds). All writes via `_update_state()` — atomic load-modify-save under `_STATE_LOCK`, safe for concurrent workers.
 - **Container restart resilience**: scheduler checks `last_shared_completed_at` at startup — skips initial full blast if completed within 4h. Per-project/space timestamps mean already-done work is skipped on resume; remaining items do their first-run full fetch and stamp themselves.
