@@ -1509,6 +1509,8 @@ class RepoIndexer:
             chunk = text[start:end].strip()
             if chunk:
                 chunks.append(chunk)
+            if end >= len(text):
+                break
             start = end - self.OVERLAP_CHARS
             if start <= 0 or start >= len(text):
                 break
