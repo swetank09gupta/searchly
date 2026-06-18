@@ -1156,6 +1156,23 @@ class RepoIndexer:
             )
             actual_sha = head_result.stdout.strip() if head_result.returncode == 0 else remote_sha
 
+            # git clone loads every repo file into page cache. Evict all of it now
+            # so the cache is near-zero before the walk begins. Opening a file
+            # without reading and calling posix_fadvise(DONTNEED) evicts the
+            # kernel-cached pages that git wrote — no additional I/O required.
+            import os as _os
+            _libc_ok = hasattr(_os, "posix_fadvise")
+            if _libc_ok:
+                for _p in Path(tmp).rglob("*"):
+                    if _p.is_file():
+                        try:
+                            with open(_p, "rb") as _f:
+                                _os.posix_fadvise(_f.fileno(), 0, 0, _os.POSIX_FADV_DONTNEED)
+                        except OSError:
+                            pass
+            rss_post_evict = _rss()
+            log.info("  %s: post-clone cache evict RSS=%dMB", label, rss_post_evict)
+
             # Stream walk: post in batches of 50 so peak memory = one batch, not full repo
             total = 0
             batch: list = []
