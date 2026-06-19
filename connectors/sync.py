@@ -1018,6 +1018,33 @@ class RepoIndexer:
             log.warning("ls-remote --heads failed for %s: %s", auth_url, exc)
             return []
 
+    def _get_commit_date(self, org: str, repo: str, sha: str):
+        """Fetch the committer date for a SHA via GitHub API. Returns a UTC-aware datetime or None."""
+        import datetime as _dt
+        if not self.cfg.github_token or not org:
+            return None
+        _headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self.cfg.github_token}",
+        }
+        try:
+            _GITHUB_RL.wait()
+            resp = requests.get(
+                f"https://api.github.com/repos/{org}/{repo}/commits/{sha}",
+                headers=_headers, timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            date_str = (
+                ((data.get("commit") or {}).get("committer") or {}).get("date")
+                or ((data.get("commit") or {}).get("author") or {}).get("date")
+            )
+            if date_str:
+                return _dt.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        except Exception as exc:
+            log.debug("get_commit_date %s/%s@%s: %s", org, repo, sha[:8], exc)
+        return None
+
     def _index_devops_repos(self, repo_specs: list[str], poster, updated_state: dict = None):
         """
         Index DevOps/deployment repos.  Unlike app repos, every non-noise branch
@@ -1033,7 +1060,16 @@ class RepoIndexer:
           sams-club-atlanta-prod  → (sams-club-atlanta, prod)
           sodimac-colombia-staging → (sodimac-colombia, staging)
         Location tokens (atlanta, colombia, …) are part of the customer ID.
+
+        First-seen branches older than DEVOPS_STALE_DAYS (default 60) are not
+        indexed but their SHA is saved to state so future commits trigger a re-index.
         """
+        import datetime as _dt
+        import re as _re
+
+        stale_days = int(os.environ.get("DEVOPS_STALE_DAYS", "60"))
+        stale_cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=stale_days)
+
         agent_url = self.cfg.agent_url
 
         for spec in repo_specs:
@@ -1051,22 +1087,37 @@ class RepoIndexer:
             repo_name = clone_url.rstrip("/").split("/")[-1].removesuffix(".git")
             auth_url  = self._auth_url(clone_url)
 
-            # Always index the default branch
-            new_sha, state_key = self._index_repo(
-                clone_url, repo_name, "devops", exts=self.include_exts, branch=None,
-                poster=poster
-            )
-            if new_sha:
-                _update_state(state_key, new_sha)
+            # Extract org for GitHub API calls (commit-date lookup)
+            _m = _re.search(r"github\.com[:/](.+?)/", clone_url)
+            org = _m.group(1) if _m else (self.github_org or "")
 
             # Index every non-noise branch + auto-register customers
             branches = self._list_all_branches(auth_url)
             log.info("DevOps repo %s: %d non-noise branches", repo_name, len(branches))
+            stale_marked = 0
             for branch_name, branch_sha in branches:
+                # Always register customer env regardless of whether we index
                 parsed = _parse_customer_branch(branch_name)
                 if parsed and agent_url:
                     customer_id, env = parsed
                     self._register_customer_env(agent_url, customer_id, env)
+
+                state_key = f"{repo_name}:{branch_name}"
+
+                # SHA unchanged since last sync — nothing to do
+                if not self.cfg.force and self._sync_state.get(state_key) == branch_sha:
+                    continue
+
+                # Branch never seen before: check commit date before full index.
+                # Stale branches (> DEVOPS_STALE_DAYS) get their SHA recorded so
+                # any future push triggers re-indexing, but we skip the expensive
+                # tarball fetch + embed cycle for content that hasn't changed recently.
+                if state_key not in self._sync_state and not self.cfg.force:
+                    commit_dt = self._get_commit_date(org, repo_name, branch_sha)
+                    if commit_dt is not None and commit_dt < stale_cutoff:
+                        _update_state(state_key, branch_sha)
+                        stale_marked += 1
+                        continue
 
                 new_sha, state_key = self._index_repo(
                     clone_url, repo_name, "devops",
@@ -1075,6 +1126,10 @@ class RepoIndexer:
                 )
                 if new_sha:
                     _update_state(state_key, new_sha)
+
+            if stale_marked:
+                log.info("  %s: %d stale branches (>%dd) — SHA recorded, not indexed",
+                         repo_name, stale_marked, stale_days)
 
     def _register_customer_env(self, agent_url: str, customer_id: str, env: str):
         """
