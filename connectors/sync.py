@@ -1833,50 +1833,32 @@ class CustomerDeployFetcher:
 # ---------------------------------------------------------------------------
 
 class JiraFetcher:
-    # Keywords in a custom field name that indicate it maps to a customer identifier.
-    _CUSTOMER_FIELD_KEYWORDS = ("customer", "origin", "site name", "location/site")
-
     def __init__(self, cfg: Config):
         self.base = cfg.jira_url
         self.auth = (cfg.jira_email, cfg.jira_token)
         self.max = cfg.jira_max_results
         self._rl = _ATLASSIAN_RL
-        self._customer_field_ids: list[str] = self._discover_customer_fields()
+        # {customfield_XXXXX -> "Human Readable Name"} for all custom fields in this Jira instance.
+        # Used to render custom field values as "Field Name: value" lines in indexed content.
+        self._custom_field_names: dict[str, str] = self._load_custom_field_names()
 
-    def _discover_customer_fields(self) -> list[str]:
-        """Query /rest/api/3/field and return IDs of all custom fields whose name
-        contains a customer-related keyword. Different projects use different fields
-        (e.g. 'GM Origins' for the GM project, 'Customer Location / Unique Identifier'
-        for AES). Fetching them all ensures no project is missed.
-        Silently falls back to a hardcoded baseline on error."""
-        baseline = [
-            "customfield_10620",  # GM Origins (GM project)
-            "customfield_10295",  # Customer Location / Unique Identifier (AES)
-            "customfield_10302",  # Customer-Name
-            "customfield_10384",  # Customer Name
-            "customfield_10580",  # Customer name (migrated)
-            "customfield_10114",  # Customer Project
-            "customfield_10376",  # Customer Project- Network
-            "customfield_10385",  # Location/Site
-            "customfield_10099",  # Origins
-        ]
+    def _load_custom_field_names(self) -> dict[str, str]:
+        """Fetch /rest/api/3/field and return {id: name} for every custom field.
+        Falls back to empty dict on error — _extract_custom_fields degrades gracefully."""
         try:
             r = _api_get(f"{self.base}/rest/api/3/field",
                          auth=self.auth, rate_limiter=self._rl, timeout=15)
             r.raise_for_status()
-            fields = r.json()
-            discovered = [
-                f["id"] for f in fields
+            mapping = {
+                f["id"]: f["name"]
+                for f in r.json()
                 if f["id"].startswith("customfield_")
-                and any(kw in f.get("name", "").lower() for kw in self._CUSTOMER_FIELD_KEYWORDS)
-            ]
-            merged = list(dict.fromkeys(discovered + baseline))  # discovered first, deduped
-            log.info("Jira customer fields discovered: %d (%s)", len(merged),
-                     ", ".join(f"{f}" for f in merged[:6]) + ("…" if len(merged) > 6 else ""))
-            return merged
+            }
+            log.info("Jira custom fields loaded: %d", len(mapping))
+            return mapping
         except Exception as e:
-            log.warning("Jira field discovery failed, using baseline: %s", e)
-            return baseline
+            log.warning("Jira field name load failed: %s", e)
+            return {}
 
     def _get(self, url, **kwargs):
         return _api_get(url, auth=self.auth, rate_limiter=self._rl, **kwargs)
@@ -1941,12 +1923,10 @@ class JiraFetcher:
         else:
             jql = f'project = "{project}" ORDER BY updated DESC'
         issues = []
-        customer_fields = ",".join(self._customer_field_ids)
         params: dict = {
             "jql": jql,
             "maxResults": 100,
-            "fields": "summary,description,status,assignee,priority,labels,"
-                      f"comment,issuetype,created,updated,fixVersions,components,{customer_fields}",
+            "fields": "*all",  # fetch all fields including every project-specific custom field
         }
         while True:
             r = self._get(
@@ -2056,39 +2036,55 @@ class JiraFetcher:
                                  linked.get("fields", {}).get("summary", linked_key), {})
                 kg.upsert_relationship("jira_issue", key, "fixed_by", "jira_issue", linked_key)
 
-    # Fields whose values are location/site strings rather than plain customer names.
-    # Kept as a class-level set for fast lookup in _extract_customer_fields.
-    _SITE_FIELD_IDS = {"customfield_10295", "customfield_10385", "customfield_10315"}
+    # Custom field types that are too large, binary, or structurally complex to index as text.
+    _SKIP_FIELD_NAMES = {
+        "development", "design", "rank", "flagged", "sprint", "approvals",
+        "submitted forms", "locked forms", "total forms", "open forms",
+        "[chart] date of first response", "[chart] time in status",
+        "satisfaction", "satisfaction date", "time to resolution",
+        "time to first response", "time to close after resolution",
+    }
 
-    def _extract_customer_fields(self, f: dict) -> tuple[list[str], list[str]]:
-        """Return (customer_names, customer_sites) from all discovered customer custom fields.
+    def _extract_custom_fields(self, f: dict) -> dict[str, list[str]]:
+        """Extract all non-empty custom fields as {field_name: [value, ...]} pairs.
 
-        Values are multi-select option arrays [{"value": "...", ...}] or plain strings.
-        Fields in _SITE_FIELD_IDS (location/site fields) go into customer_sites;
-        all others go into customer_names.
+        Handles the common Jira custom field value shapes:
+          - option / single-select: {"value": "foo"}
+          - multi-select:           [{"value": "foo"}, ...]
+          - user picker:            {"displayName": "Alice"}
+          - plain string / number
+          - ADF doc (skipped — already covered by description)
+          - nested objects with no obvious scalar (skipped)
         """
-        def _vals(key: str) -> list[str]:
-            raw = f.get(key)
-            if not raw:
-                return []
-            if isinstance(raw, list):
-                return [o["value"] for o in raw if isinstance(o, dict) and o.get("value")]
-            if isinstance(raw, dict) and raw.get("value"):
-                return [raw["value"]]
-            if isinstance(raw, str):
-                return [raw]
-            return []
-
-        names, sites = [], []
-        for fid in self._customer_field_ids:
-            vals = _vals(fid)
-            if not vals:
+        result: dict[str, list[str]] = {}
+        for fid, name in self._custom_field_names.items():
+            if name.lower() in self._SKIP_FIELD_NAMES:
                 continue
-            if fid in self._SITE_FIELD_IDS:
-                sites.extend(vals)
-            else:
-                names.extend(vals)
-        return names, sites
+            raw = f.get(fid)
+            if raw is None or raw == "" or raw == [] or raw == {}:
+                continue
+            vals: list[str] = []
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        v = item.get("value") or item.get("name") or item.get("displayName")
+                        if v:
+                            vals.append(str(v))
+                    elif isinstance(item, str) and item:
+                        vals.append(item)
+            elif isinstance(raw, dict):
+                # Skip ADF documents
+                if raw.get("type") == "doc":
+                    continue
+                v = (raw.get("value") or raw.get("name") or
+                     raw.get("displayName") or raw.get("key"))
+                if v:
+                    vals.append(str(v))
+            elif isinstance(raw, (str, int, float)):
+                vals.append(str(raw))
+            if vals:
+                result[name] = vals
+        return result
 
     def _to_doc(self, issue: dict) -> Optional[dict]:
         f = issue.get("fields", {})
@@ -2099,34 +2095,36 @@ class JiraFetcher:
             for c in (f.get("comment") or {}).get("comments", [])
             if adf_to_text(c.get("body") or {})
         ]
-        customer_names, customer_sites = self._extract_customer_fields(f)
-        customer_header = ""
-        if customer_names:
-            customer_header += "Customer: " + ", ".join(customer_names) + "\n"
-        if customer_sites:
-            customer_header += "Customer Site: " + ", ".join(customer_sites) + "\n"
+        custom = self._extract_custom_fields(f)
+        # Prepend all custom field values as "Field Name: val1, val2" lines so BM25
+        # can match queries that reference project-specific attributes (customer name,
+        # product line, severity, sprint, etc.) without knowing the field IDs.
+        custom_header = "".join(
+            f"{name}: {', '.join(vals)}\n"
+            for name, vals in sorted(custom.items())
+            if vals
+        )
         body = "\n\n".join(p for p in [desc] + comments if p).strip() or title
-        content = (customer_header + body).strip()
+        content = (custom_header + body).strip()
         return {
             "title": title,
             "content": content,
             "metadata": {
-                "source":          "jira",
-                "source_id":       issue["key"],
-                "issue_key":       issue["key"],
-                "project":         issue["key"].split("-")[0],
-                "status":          (f.get("status") or {}).get("name", ""),
-                "issue_type":      (f.get("issuetype") or {}).get("name", ""),
-                "priority":        (f.get("priority") or {}).get("name", ""),
-                "assignee":        (f.get("assignee") or {}).get("displayName", ""),
-                "labels":          f.get("labels", []),
-                "components":      [c["name"] for c in f.get("components", [])],
-                "fix_versions":    [v["name"] for v in f.get("fixVersions", [])],
-                "url":             f"{self.base}/browse/{issue['key']}",
-                "created":         f.get("created", ""),
-                "updated":         f.get("updated", ""),
-                "customer_name":   customer_names,
-                "customer_site":   customer_sites,
+                "source":       "jira",
+                "source_id":    issue["key"],
+                "issue_key":    issue["key"],
+                "project":      issue["key"].split("-")[0],
+                "status":       (f.get("status") or {}).get("name", ""),
+                "issue_type":   (f.get("issuetype") or {}).get("name", ""),
+                "priority":     (f.get("priority") or {}).get("name", ""),
+                "assignee":     (f.get("assignee") or {}).get("displayName", ""),
+                "labels":       f.get("labels", []),
+                "components":   [c["name"] for c in f.get("components", [])],
+                "fix_versions": [v["name"] for v in f.get("fixVersions", [])],
+                "url":          f"{self.base}/browse/{issue['key']}",
+                "created":      f.get("created", ""),
+                "updated":      f.get("updated", ""),
+                "custom_fields": {name: vals for name, vals in custom.items()},
             },
         }
 
