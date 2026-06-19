@@ -199,16 +199,22 @@ public class RagService {
         final String  fc = customer, fp = effectiveProduct, fe = effectiveEnv, fs = effectiveService;
         final List<Double> fOrig = origVec, fRew = rewriteVec;
 
+        // Base 4 legs search all indexed knowledge (Jira, Confluence, GitHub, logs).
+        // They must NOT filter by customer/product/env — those fields only exist on live-ops
+        // docs (deployment state, logs). Applying them here would silently exclude all
+        // Jira and Confluence results when customer= is set.
+        // The dedicated customer-specific legs (fCustKnn, fCustBm25) below handle
+        // the strict-scoped live-ops search with 2× RRF weight.
         CompletableFuture<List<KnnSearchClient.ChunkHit>> fKnnOrig = origVec.isEmpty()
                 ? CompletableFuture.completedFuture(List.of())
-                : asyncRetrieval(() -> knnClient.searchWithService(fi, fOrig, ft, CANDIDATE_K, fc, fp, fe, fs));
+                : asyncRetrieval(() -> knnClient.searchWithService(fi, fOrig, ft, CANDIDATE_K, null, null, null, null));
         CompletableFuture<List<KnnSearchClient.ChunkHit>> fKnnRew = (!queryChanged || rewriteVec.isEmpty())
                 ? CompletableFuture.completedFuture(List.of())
-                : asyncRetrieval(() -> knnClient.searchWithService(fi, fRew, ft, CANDIDATE_K, fc, fp, fe, fs));
+                : asyncRetrieval(() -> knnClient.searchWithService(fi, fRew, ft, CANDIDATE_K, null, null, null, null));
         CompletableFuture<List<KnnSearchClient.ChunkHit>> fBm25Orig =
-                asyncRetrieval(() -> bm25SearchWithService(fi, question, ft, fc, fp, fe, fs));
+                asyncRetrieval(() -> bm25SearchWithService(fi, question, ft, null, null, null, null));
         CompletableFuture<List<KnnSearchClient.ChunkHit>> fBm25Rew = queryChanged
-                ? asyncRetrieval(() -> bm25SearchWithService(fi, rewrittenQuery, ft, fc, fp, fe, fs))
+                ? asyncRetrieval(() -> bm25SearchWithService(fi, rewrittenQuery, ft, null, null, null, null))
                 : CompletableFuture.completedFuture(List.of());
         CompletableFuture<List<KnnSearchClient.ChunkHit>> fCustKnn =
                 (customer != null && !customer.isBlank() && !origVec.isEmpty())
