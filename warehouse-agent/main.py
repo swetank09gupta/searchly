@@ -165,7 +165,7 @@ class ChatResponse(BaseModel):
 class CreateCustomerRequest(BaseModel):
     id:              str
     name:            str
-    products:        list[str] = Field(..., description="Must be valid product IDs from GET /api/v1/products")
+    products:        list[str] = Field(default_factory=list, description="Valid product IDs from GET /api/v1/products; empty = unknown")
     lifecycle_stage: str = "solution"
     notes:           str = ""
     aliases:         list[str] = Field(default_factory=list)

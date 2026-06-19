@@ -371,6 +371,8 @@ _DEVOPS_SIGNAL_RE = re.compile(
     r"|.+-(" + "|".join(_BRANCH_ENV_SUFFIXES.keys()) + r")$",
     re.IGNORECASE,
 )
+# Jira ticket branches that happen to end in an env suffix (e.g. GM-278839-test, AE-123-prod)
+_JIRA_TICKET_RE = re.compile(r"^[A-Z]+-\d+", re.IGNORECASE)
 
 
 def _parse_customer_branch(branch_name: str) -> tuple[str, str] | None:
@@ -1107,7 +1109,8 @@ class RepoIndexer:
             # develop/master/main + customer-env branches (*-prod, *-staging, etc.).
             # Ticket branches (GM-*, AE-*), version tags, archive/* etc. are excluded.
             branches_all = self._list_all_branches(auth_url)
-            branches = [(n, s) for n, s in branches_all if _DEVOPS_SIGNAL_RE.match(n)]
+            branches = [(n, s) for n, s in branches_all
+                        if _DEVOPS_SIGNAL_RE.match(n) and not _JIRA_TICKET_RE.match(n)]
             log.info("DevOps repo %s: %d signal branches (%d total non-noise, %d skipped)",
                      repo_name, len(branches), len(branches_all), len(branches_all) - len(branches))
             stale_marked = 0
