@@ -362,6 +362,17 @@ _BRANCH_ENV_SUFFIXES = {
 }
 
 
+# Devops repos only index branches that represent real deployment environments.
+# Matches: develop, master, main, and any branch ending with a known env suffix
+# (e.g. sodimac-colombia-prod, sams-club-atlanta-staging).
+# Ticket branches (GM-*, AE-*), version tags (7.3.0.2), archive/* etc. are skipped.
+_DEVOPS_SIGNAL_RE = re.compile(
+    r"^(develop|master|main)$"
+    r"|.+-(" + "|".join(_BRANCH_ENV_SUFFIXES.keys()) + r")$",
+    re.IGNORECASE,
+)
+
+
 def _parse_customer_branch(branch_name: str) -> tuple[str, str] | None:
     """
     Parse a deployment-repo branch name into (customer_id, env).
@@ -1091,9 +1102,14 @@ class RepoIndexer:
             _m = _re.search(r"github\.com[:/](.+?)/", clone_url)
             org = _m.group(1) if _m else (self.github_org or "")
 
-            # Index every non-noise branch + auto-register customers
-            branches = self._list_all_branches(auth_url)
-            log.info("DevOps repo %s: %d non-noise branches", repo_name, len(branches))
+            # Index every non-noise branch + auto-register customers.
+            # For devops repos, further filter to signal branches only:
+            # develop/master/main + customer-env branches (*-prod, *-staging, etc.).
+            # Ticket branches (GM-*, AE-*), version tags, archive/* etc. are excluded.
+            branches_all = self._list_all_branches(auth_url)
+            branches = [(n, s) for n, s in branches_all if _DEVOPS_SIGNAL_RE.match(n)]
+            log.info("DevOps repo %s: %d signal branches (%d total non-noise, %d skipped)",
+                     repo_name, len(branches), len(branches_all), len(branches_all) - len(branches))
             stale_marked = 0
             for branch_name, branch_sha in branches:
                 # Always register customer env regardless of whether we index
