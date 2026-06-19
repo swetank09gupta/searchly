@@ -1067,7 +1067,7 @@ class RepoIndexer:
         import datetime as _dt
         import re as _re
 
-        stale_days = int(os.environ.get("DEVOPS_STALE_DAYS", "60"))
+        stale_days = int(os.environ.get("DEVOPS_STALE_DAYS", "180"))
         stale_cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=stale_days)
 
         agent_url = self.cfg.agent_url
