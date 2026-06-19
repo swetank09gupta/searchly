@@ -1828,7 +1828,7 @@ class JiraFetcher:
         Returns the number of issues processed.
         """
         if since:
-            dt = time.strftime("%Y-%m-%d %H:%M", time.gmtime(since - 300))
+            dt = time.strftime("%Y-%m-%d %H:%M", time.gmtime(since - 60))
             jql = f'project = "{project}" AND updated >= "{dt}" ORDER BY updated DESC'
         else:
             jql = f'project = "{project}" ORDER BY updated DESC'
@@ -1868,8 +1868,8 @@ class JiraFetcher:
         # /rest/api/3/search was deprecated (returns 410 Gone).
         # /rest/api/3/search/jql uses cursor-based pagination via nextPageToken.
         if since:
-            # 5-min buffer so items updated mid-crawl on the previous run aren't missed
-            dt = time.strftime("%Y-%m-%d %H:%M", time.gmtime(since - 300))
+            # 60s buffer so items updated right at the end of the previous crawl aren't missed
+            dt = time.strftime("%Y-%m-%d %H:%M", time.gmtime(since - 60))
             jql = f'project = "{project}" AND updated >= "{dt}" ORDER BY updated DESC'
         else:
             jql = f'project = "{project}" ORDER BY updated DESC'
@@ -2282,6 +2282,8 @@ def main():
             projects = cfg.jira_projects or jira.list_projects()
             log.info("Syncing Jira: %s (adaptive, max=%d)", projects, cfg.atlassian_workers)
 
+            kg_resync_secs = int(os.environ.get("KG_JIRA_RESYNC_HOURS", "2")) * 3600
+
             def _sync_jira_project(proj: str) -> None:
                 import gc
                 state = _load_sync_state()
@@ -2289,16 +2291,23 @@ def main():
                 since = int(since) if since else None
                 kg_since_ts = None if cfg.force else state.get(f"kg_jira_project_{proj}_completed_at")
                 kg_since = int(kg_since_ts) if kg_since_ts else None
+                # Skip KG remote-link fetch if already done within KG_JIRA_RESYNC_HOURS
+                skip_kg = (not cfg.force) and kg_since and (int(time.time()) - kg_since < kg_resync_secs)
                 try:
                     docs = [part for d in jira.fetch_issues(proj, since=since)
                             for part in split_doc(d)]
                     poster.post_batch(docs, workers=cfg.batch_size)
                     del docs
                     gc.collect()
-                    jira.sync_kg_for_project(proj, kg, since=kg_since)
+                    if not skip_kg:
+                        jira.sync_kg_for_project(proj, kg, since=kg_since)
+                    else:
+                        log.debug("KG Jira %s: skipped (last sync %dm ago)", proj,
+                                  (int(time.time()) - kg_since) // 60)
                     now = int(time.time())
                     _update_state(f"jira_project_{proj}_completed_at", now)
-                    _update_state(f"kg_jira_project_{proj}_completed_at", now)
+                    if not skip_kg:
+                        _update_state(f"kg_jira_project_{proj}_completed_at", now)
                 except Exception as e:
                     log.error("Jira %s: %s", proj, e)
 
