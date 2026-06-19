@@ -890,7 +890,7 @@ class RepoIndexer:
             clone_url = self._resolve_url(repo_name)
             auth_url  = self._auth_url(clone_url)
 
-            new_sha, state_key = self._index_repo(
+            new_sha, state_key, _ = self._index_repo(
                 clone_url, repo_name, product_name, exts=exts, branch=None,
                 poster=poster
             )
@@ -899,7 +899,7 @@ class RepoIndexer:
 
             _GITHUB_RL.wait()
             for branch_name, _ in self._resolve_branches(auth_url, branch_patterns):
-                new_sha, state_key = self._index_repo(
+                new_sha, state_key, _ = self._index_repo(
                     clone_url, repo_name, product_name,
                     exts=exts, branch=branch_name, poster=poster
                 )
@@ -1085,6 +1085,17 @@ class RepoIndexer:
 
         agent_url = self.cfg.agent_url
 
+        # Fetch valid product IDs once so we can detect them from tarball file paths
+        known_product_ids: set = set()
+        if agent_url:
+            try:
+                import requests as _rq
+                _pr = _rq.get(f"{agent_url}/api/v1/products", timeout=10)
+                if _pr.ok:
+                    known_product_ids = {p["id"] for p in _pr.json().get("products", [])}
+            except Exception as _exc:
+                log.debug("Could not fetch product IDs from agent: %s", _exc)
+
         for spec in repo_specs:
             # Resolve to a clone URL
             if spec.startswith("http") or spec.startswith("git@"):
@@ -1115,16 +1126,14 @@ class RepoIndexer:
                      repo_name, len(branches), len(branches_all), len(branches_all) - len(branches))
             stale_marked = 0
             for branch_name, branch_sha in branches:
-                # Always register customer env regardless of whether we index
                 parsed = _parse_customer_branch(branch_name)
-                if parsed and agent_url:
-                    customer_id, env = parsed
-                    self._register_customer_env(agent_url, customer_id, env)
-
                 state_key = f"{repo_name}:{branch_name}"
 
-                # SHA unchanged since last sync — nothing to do
+                # SHA unchanged since last sync — re-register customer (idempotent) and skip indexing
                 if not self.cfg.force and self._sync_state.get(state_key) == branch_sha:
+                    if parsed and agent_url:
+                        customer_id, env = parsed
+                        self._register_customer_env(agent_url, customer_id, env)
                     continue
 
                 # Branch never seen before: check commit date before full index.
@@ -1138,22 +1147,30 @@ class RepoIndexer:
                         stale_marked += 1
                         continue
 
-                new_sha, state_key = self._index_repo(
+                new_sha, state_key, detected_products = self._index_repo(
                     clone_url, repo_name, "devops",
                     exts=self.include_exts, branch=branch_name, poster=poster,
                     known_sha=branch_sha,
+                    detect_products=known_product_ids if known_product_ids else None,
                 )
                 if new_sha:
                     _update_state(state_key, new_sha)
+                # Register customer with products found in the deployment files
+                if parsed and agent_url:
+                    customer_id, env = parsed
+                    self._register_customer_env(agent_url, customer_id, env,
+                                                products=sorted(detected_products))
 
             if stale_marked:
                 log.info("  %s: %d stale branches (>%dd) — SHA recorded, not indexed",
                          repo_name, stale_marked, stale_days)
 
-    def _register_customer_env(self, agent_url: str, customer_id: str, env: str):
+    def _register_customer_env(self, agent_url: str, customer_id: str, env: str,
+                               products: list | None = None):
         """
         Upsert a customer + environment into the intelligence agent registry.
         Both calls are idempotent — safe to call on every sync run.
+        products: list of product IDs detected from deployment files (may be empty).
         """
         customer_name = _customer_name_from_id(customer_id)
         lifecycle = env if env in ("prod", "staging", "dev", "testing") else "solution"
@@ -1162,7 +1179,8 @@ class RepoIndexer:
         try:
             r = requests.post(
                 f"{agent_url}/api/v1/customers",
-                json={"id": customer_id, "name": customer_name, "lifecycle_stage": lifecycle},
+                json={"id": customer_id, "name": customer_name, "lifecycle_stage": lifecycle,
+                      "products": products or []},
                 timeout=10,
             )
             if r.status_code not in (200, 201, 409):
@@ -1206,17 +1224,16 @@ class RepoIndexer:
                     exts: set | None = None,
                     branch: str | None = None,
                     poster=None,
-                    known_sha: str | None = None) -> tuple[str | None, str]:
+                    known_sha: str | None = None,
+                    detect_products: set | None = None) -> tuple[str | None, str, set]:
         """
         Clone a repo (or a specific branch), stream-walk files, post in batches.
 
         state_key is  "repo_name"         for the default branch
                       "repo_name:branch"  for named branches
-        Returns (None, state_key) when the branch is unchanged or clone fails,
-        (actual_sha, state_key) on success.
-
-        Docs are streamed in batches of 50 directly to `poster` so peak memory
-        is one batch (~100 KB), not the entire repo walk (~8 GB for large repos).
+        Returns (sha_or_None, state_key, detected_products_set).
+        detected_products is populated when detect_products is provided — a set of
+        known product IDs to scan for in file paths and content.
         """
         if exts is None:
             exts = self.include_exts
@@ -1232,7 +1249,7 @@ class RepoIndexer:
             remote_sha = known_sha or self._remote_sha(auth_url, branch)
             if remote_sha and self._sync_state.get(state_key) == remote_sha:
                 log.info("  %s: unchanged (%s), skipping", label, remote_sha[:8])
-                return None, state_key
+                return None, state_key, set()
         else:
             remote_sha = None
 
@@ -1267,7 +1284,7 @@ class RepoIndexer:
             resp.raise_for_status()
         except Exception as e:
             log.error("Tarball fetch failed for %s: %s", label, e)
-            return None, state_key
+            return None, state_key, set()
 
         # actual_sha: GitHub includes {org}-{repo}-{short_sha} as the top dir name;
         # fall back to remote_sha if we can't parse it.
@@ -1277,6 +1294,7 @@ class RepoIndexer:
 
         total = 0
         batch: list = []
+        found_products: set = set()
         try:
             # Use resp as context manager so the TCP connection (and its kernel socket
             # receive buffer) is released immediately after tarfile finishes. Without
@@ -1310,6 +1328,13 @@ class RepoIndexer:
                             text = _f.read().decode("utf-8", errors="replace")
                             _f.close()
                             del _f
+
+                            # Detect products from file path and first 2KB of content
+                            if detect_products and len(found_products) < len(detect_products):
+                                _haystack = (rel + "\n" + text[:2048]).lower()
+                                for _pid in detect_products:
+                                    if _pid not in found_products and _pid.lower() in _haystack:
+                                        found_products.add(_pid)
 
                             dt = self._doc_type(rel)
                             if dt:
@@ -1348,7 +1373,7 @@ class RepoIndexer:
                             log.debug("Skip %s: %s", rel, e)
         except Exception as e:
             log.error("Tarball stream error for %s: %s", label, e)
-            return None, state_key
+            return None, state_key, set()
 
         if batch and poster:
             poster.post_batch(batch, workers=self.cfg.batch_size)
@@ -1361,7 +1386,7 @@ class RepoIndexer:
         rss_final = _rss()
         log.info("  %s: %d chunks (%s) RSS=%dMB (total +%dMB)",
                  label, total, (actual_sha or "")[:8], rss_final, rss_final - rss_before)
-        return actual_sha, state_key
+        return actual_sha, state_key, found_products
 
     def sync_kg_for_repo(self, repo_name: str, org: str, kg: "KgPoster",
                          max_prs: int = 200, since: str | None = None) -> int:
