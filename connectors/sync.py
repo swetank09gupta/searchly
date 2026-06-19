@@ -1881,7 +1881,9 @@ class JiraFetcher:
             "jql": jql,
             "maxResults": 100,
             "fields": "summary,description,status,assignee,priority,labels,"
-                      "comment,issuetype,created,updated,fixVersions,components",
+                      "comment,issuetype,created,updated,fixVersions,components,"
+                      "customfield_10620,customfield_10295,customfield_10302,"
+                      "customfield_10384,customfield_10580",
         }
         while True:
             r = self._get(
@@ -1991,6 +1993,29 @@ class JiraFetcher:
                                  linked.get("fields", {}).get("summary", linked_key), {})
                 kg.upsert_relationship("jira_issue", key, "fixed_by", "jira_issue", linked_key)
 
+    @staticmethod
+    def _extract_customer_fields(f: dict) -> tuple[list[str], list[str]]:
+        """Return (customer_names, customer_sites) extracted from known customer custom fields.
+
+        Different projects use different fields:
+          customfield_10620 — GM Origins        (GM project)
+          customfield_10302 — Customer-Name     (AES and others)
+          customfield_10384 — Customer Name
+          customfield_10580 — Customer name (migrated)
+          customfield_10295 — Customer Location / Unique Identifier (AES — includes site like "GMI (Social Circle, GA, USA)")
+        All are multi-select option arrays: [{"value": "...", ...}]
+        """
+        def _vals(key: str) -> list[str]:
+            raw = f.get(key) or []
+            if isinstance(raw, list):
+                return [o["value"] for o in raw if isinstance(o, dict) and o.get("value")]
+            return []
+
+        names = _vals("customfield_10620") + _vals("customfield_10302") + \
+                _vals("customfield_10384") + _vals("customfield_10580")
+        sites = _vals("customfield_10295")
+        return names, sites
+
     def _to_doc(self, issue: dict) -> Optional[dict]:
         f = issue.get("fields", {})
         title = f"[{issue['key']}] {f.get('summary', '')}"
@@ -2000,25 +2025,34 @@ class JiraFetcher:
             for c in (f.get("comment") or {}).get("comments", [])
             if adf_to_text(c.get("body") or {})
         ]
-        content = "\n\n".join(p for p in [desc] + comments if p).strip() or title
+        customer_names, customer_sites = self._extract_customer_fields(f)
+        customer_header = ""
+        if customer_names:
+            customer_header += "Customer: " + ", ".join(customer_names) + "\n"
+        if customer_sites:
+            customer_header += "Customer Site: " + ", ".join(customer_sites) + "\n"
+        body = "\n\n".join(p for p in [desc] + comments if p).strip() or title
+        content = (customer_header + body).strip()
         return {
             "title": title,
             "content": content,
             "metadata": {
-                "source":      "jira",
-                "source_id":   issue["key"],   # used for tombstone tracking (P0.3)
-                "issue_key":   issue["key"],
-                "project":     issue["key"].split("-")[0],
-                "status":      (f.get("status") or {}).get("name", ""),
-                "issue_type":  (f.get("issuetype") or {}).get("name", ""),
-                "priority":    (f.get("priority") or {}).get("name", ""),
-                "assignee":    (f.get("assignee") or {}).get("displayName", ""),
-                "labels":      f.get("labels", []),
-                "components":  [c["name"] for c in f.get("components", [])],
-                "fix_versions": [v["name"] for v in f.get("fixVersions", [])],
-                "url":         f"{self.base}/browse/{issue['key']}",
-                "created":     f.get("created", ""),
-                "updated":     f.get("updated", ""),
+                "source":          "jira",
+                "source_id":       issue["key"],
+                "issue_key":       issue["key"],
+                "project":         issue["key"].split("-")[0],
+                "status":          (f.get("status") or {}).get("name", ""),
+                "issue_type":      (f.get("issuetype") or {}).get("name", ""),
+                "priority":        (f.get("priority") or {}).get("name", ""),
+                "assignee":        (f.get("assignee") or {}).get("displayName", ""),
+                "labels":          f.get("labels", []),
+                "components":      [c["name"] for c in f.get("components", [])],
+                "fix_versions":    [v["name"] for v in f.get("fixVersions", [])],
+                "url":             f"{self.base}/browse/{issue['key']}",
+                "created":         f.get("created", ""),
+                "updated":         f.get("updated", ""),
+                "customer_name":   customer_names,
+                "customer_site":   customer_sites,
             },
         }
 
