@@ -1833,6 +1833,10 @@ class CustomerDeployFetcher:
 # ---------------------------------------------------------------------------
 
 class JiraFetcher:
+    # Custom field names whose values commonly contain customer identifiers.
+    # Used to extract metadata.customer so customer-specific search legs (×2.0 weight) find Jira docs.
+    _CUSTOMER_FIELD_KEYWORDS = {"customer", "client", "origin", "account", "site"}
+
     def __init__(self, cfg: Config):
         self.base = cfg.jira_url
         self.auth = (cfg.jira_email, cfg.jira_token)
@@ -1841,6 +1845,9 @@ class JiraFetcher:
         # {customfield_XXXXX -> "Human Readable Name"} for all custom fields in this Jira instance.
         # Used to render custom field values as "Field Name: value" lines in indexed content.
         self._custom_field_names: dict[str, str] = self._load_custom_field_names()
+        # {lowercase_alias_or_name_token -> customer_id} built from the intelligence-agent customer registry.
+        # Used to tag Jira docs with metadata.customer so customer-specific search legs find them.
+        self._customer_index: dict[str, str] = self._load_customer_index(cfg.agent_url)
 
     def _load_custom_field_names(self) -> dict[str, str]:
         """Fetch /rest/api/3/field and return {id: name} for every custom field.
@@ -1859,6 +1866,53 @@ class JiraFetcher:
         except Exception as e:
             log.warning("Jira field name load failed: %s", e)
             return {}
+
+    def _load_customer_index(self, agent_url: str) -> dict[str, str]:
+        """Build {lowercase_token -> customer_id} from the intelligence-agent registry.
+        Each customer's ID, name words, and aliases are indexed so that Jira custom field
+        values like 'GMI (Social Circle, GA, USA)' resolve to 'gmi'.
+        Falls back to empty dict if the agent is unreachable."""
+        try:
+            r = requests.get(f"{agent_url}/api/v1/customers", timeout=10)
+            r.raise_for_status()
+            customers = r.json()
+        except Exception as e:
+            log.warning("Customer registry unavailable, Jira customer tagging disabled: %s", e)
+            return {}
+        index: dict[str, str] = {}
+        for c in customers:
+            cid = c.get("id", "")
+            if not cid:
+                continue
+            # Register the customer ID itself and each alias
+            for token in [cid] + (c.get("aliases") or []):
+                index[token.lower()] = cid
+            # Register each word of the customer name (min 3 chars to avoid noise)
+            for word in re.split(r"[\s\-_/]+", c.get("name", "")):
+                if len(word) >= 3:
+                    index[word.lower()] = cid
+        log.info("Customer index built: %d tokens → %d customers",
+                 len(index), len({v for v in index.values()}))
+        return index
+
+    def _resolve_customer(self, custom: dict[str, list[str]]) -> str | None:
+        """Try to match a customer ID from Jira custom field values.
+        Only inspects fields whose names contain customer-related keywords.
+        Returns the first matched customer_id, or None."""
+        if not self._customer_index:
+            return None
+        for field_name, vals in custom.items():
+            name_lower = field_name.lower()
+            if not any(kw in name_lower for kw in self._CUSTOMER_FIELD_KEYWORDS):
+                continue
+            for val in vals:
+                # Slide a window over the words in the value to find customer matches.
+                # "GMI (Social Circle, GA, USA)" → tokens ["gmi","social","circle","ga","usa"]
+                tokens = re.split(r"[\s\-_/(,)]+", val.lower())
+                for tok in tokens:
+                    if len(tok) >= 2 and tok in self._customer_index:
+                        return self._customer_index[tok]
+        return None
 
     def _get(self, url, **kwargs):
         return _api_get(url, auth=self.auth, rate_limiter=self._rl, **kwargs)
@@ -2106,26 +2160,32 @@ class JiraFetcher:
         )
         body = "\n\n".join(p for p in [desc] + comments if p).strip() or title
         content = (custom_header + body).strip()
+        # Resolve metadata.customer from customer-related custom fields so the
+        # customer-specific search legs (×2.0 weight boost) can find this Jira doc.
+        resolved_customer = self._resolve_customer(custom)
+        metadata: dict = {
+            "source":       "jira",
+            "source_id":    issue["key"],
+            "issue_key":    issue["key"],
+            "project":      issue["key"].split("-")[0],
+            "status":       (f.get("status") or {}).get("name", ""),
+            "issue_type":   (f.get("issuetype") or {}).get("name", ""),
+            "priority":     (f.get("priority") or {}).get("name", ""),
+            "assignee":     (f.get("assignee") or {}).get("displayName", ""),
+            "labels":       f.get("labels", []),
+            "components":   [c["name"] for c in f.get("components", [])],
+            "fix_versions": [v["name"] for v in f.get("fixVersions", [])],
+            "url":          f"{self.base}/browse/{issue['key']}",
+            "created":      f.get("created", ""),
+            "updated":      f.get("updated", ""),
+            "custom_fields": {name: vals for name, vals in custom.items()},
+        }
+        if resolved_customer:
+            metadata["customer"] = resolved_customer
         return {
-            "title": title,
-            "content": content,
-            "metadata": {
-                "source":       "jira",
-                "source_id":    issue["key"],
-                "issue_key":    issue["key"],
-                "project":      issue["key"].split("-")[0],
-                "status":       (f.get("status") or {}).get("name", ""),
-                "issue_type":   (f.get("issuetype") or {}).get("name", ""),
-                "priority":     (f.get("priority") or {}).get("name", ""),
-                "assignee":     (f.get("assignee") or {}).get("displayName", ""),
-                "labels":       f.get("labels", []),
-                "components":   [c["name"] for c in f.get("components", [])],
-                "fix_versions": [v["name"] for v in f.get("fixVersions", [])],
-                "url":          f"{self.base}/browse/{issue['key']}",
-                "created":      f.get("created", ""),
-                "updated":      f.get("updated", ""),
-                "custom_fields": {name: vals for name, vals in custom.items()},
-            },
+            "title":    title,
+            "content":  content,
+            "metadata": metadata,
         }
 
 

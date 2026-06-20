@@ -354,14 +354,16 @@ async def search_knowledge(
     product:      str | None = None,
 ) -> dict[str, Any]:
     """Search Jira tickets, Confluence docs, and code via Searchly."""
-    params: dict[str, str] = {"q": query, "size": "5", "rag_only": "true"}
+    # hits_only=true skips Ollama synthesis — the agent does its own synthesis.
+    # rag_only=true still needed to prevent the circular call loop (agent → search-api → agent).
+    params: dict[str, str] = {"q": query, "size": "5", "rag_only": "true", "hits_only": "true"}
     if customer_id:
         params["customer"] = customer_id
     if product:
         params["product"] = product
     headers = {"X-Tenant-ID": tenant, "X-Tenant-Tier": "SHARED"}
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
                 f"{searchly_url}/api/v1/search",
                 params=params, headers=headers,

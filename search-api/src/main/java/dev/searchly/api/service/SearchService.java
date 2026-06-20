@@ -62,6 +62,15 @@ public class SearchService {
                                              String customer, String product,
                                              String env, String sessionId,
                                              String cursor, boolean ragOnly) throws IOException {
+        return search(q, page, size, fuzzy, highlight, facets, customer, product, env, sessionId, cursor, ragOnly, false);
+    }
+
+    public DocumentDto.SearchResponse search(String q, int page, int size,
+                                             boolean fuzzy, boolean highlight,
+                                             List<String> facets,
+                                             String customer, String product,
+                                             String env, String sessionId,
+                                             String cursor, boolean ragOnly, boolean hitsOnly) throws IOException {
         TenantContext ctx = TenantContextHolder.require();
         String roleKey  = ctx.roles().stream().sorted().reduce((a, b) -> a + "," + b).orElse("");
         String facetKey = facets == null ? "" : String.join(",", facets);
@@ -185,12 +194,18 @@ public class SearchService {
         }
 
         // --- leg 2: warehouse agent chat (with fuzzy resolution + live data) or static RAG ---
+        // hitsOnly=true skips the LLM synthesis — used by search_knowledge() in the warehouse agent
+        // so it doesn't wait for Ollama when only the chunk hits are needed for its own synthesis.
         RagService.RagResult ragResult;
-        try {
-            ragResult = rag.answer(q, ctx, customer, product, env, sessionId, ragOnly);
-        } catch (Exception e) {
-            log.warn("RAG pipeline failed, returning keyword hits only: {}", e.getMessage());
+        if (hitsOnly) {
             ragResult = new RagService.RagResult(null, List.of());
+        } else {
+            try {
+                ragResult = rag.answer(q, ctx, customer, product, env, sessionId, ragOnly);
+            } catch (Exception e) {
+                log.warn("RAG pipeline failed, returning keyword hits only: {}", e.getMessage());
+                ragResult = new RagService.RagResult(null, List.of());
+            }
         }
 
         DocumentDto.SearchResponse response = new DocumentDto.SearchResponse(

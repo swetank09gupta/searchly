@@ -58,10 +58,11 @@ public class SearchController {
             @RequestParam(value = "env",       required = false)        String       env,
             @RequestParam(value = "session",   required = false)        String       sessionId,
             @RequestParam(value = "cursor",    required = false)        String       cursor,
-            @RequestParam(value = "rag_only", defaultValue = "false")  boolean      ragOnly
+            @RequestParam(value = "rag_only",   defaultValue = "false") boolean      ragOnly,
+            @RequestParam(value = "hits_only",  defaultValue = "false") boolean      hitsOnly
     ) throws IOException {
         if (size > 100) size = 100;
         return search.search(q, page, size, fuzzy, highlight, facets,
-                             customer, product, env, sessionId, cursor, ragOnly);
+                             customer, product, env, sessionId, cursor, ragOnly, hitsOnly);
     }
 }
