@@ -37,7 +37,7 @@ Summary of choices and assumptions behind Searchly. **For full context, alternat
 | Knowledge graph store | PostgreSQL flat tables + JSONB | Neo4j / Neptune | Queries never exceed depth 3; dedicated graph DB doubles operational complexity for shallow traversal |
 | Retrieval observability | `RetrievalTrace` per chunk in `SearchResponse` | Log-side only | Eval tooling and debugging need the trace co-located with the response, not reconstructed via trace_id join |
 | Session memory | Rolling summary + structured `session_memory` dict | Full conversation history | Full history OOMs Ollama context window at ~8 turns; structured dict preserves entities across compressions |
-| Eval scheduling | APScheduler nightly (process-internal) | External cron + CI | Keeps dependency count low; nightly is sufficient; move to CI if warehouse-agent scales to multiple replicas |
+| Eval scheduling | APScheduler nightly (process-internal) | External cron + CI | Keeps dependency count low; nightly is sufficient; move to CI if intelligence-agent scales to multiple replicas |
 
 ## Out of Scope for Prototype (documented in PRODUCTION_READINESS.md)
 

@@ -33,11 +33,11 @@ def load(path: str | None = None) -> None:
     except Exception as e:
         log.warning("Could not load products.yml (%s) — using defaults", e)
         PRODUCTS = {
-            "pick-assist":     "Pick Assist / OGA — operator guidance, task allocation",
-            "greymatter":      "GreyMatter WES/WCS platform",
-            "intralogistics":  "Intralogistics — CRN robot fleet",
-            "gsb":             "GreyMatter Solution Builder",
-            "rdc":             "RDC — rack-based delivery cart / sortation",
+            "pick-assist":     "Pick Assist — operator guidance, task allocation",
+            "core-platform":   "Core Platform — WES/WCS",
+            "intralogistics":  "Intralogistics — autonomous fleet management",
+            "solution-builder":"Solution Builder",
+            "rdc":             "RDC — sortation and delivery",
             "wms":             "WMS / ERP integrations",
             "sre":             "SRE Platform — infra, monitoring, deployment",
             "ai-ml":           "AI/ML models and analytics",
@@ -96,7 +96,7 @@ def parse_selection(text: str) -> list[str]:
         if 0 <= idx < len(known):
             result.append(known[idx])
 
-    # Named picks: "pick-assist", "greymatter"
+    # Named picks: "pick-assist", "core-platform"
     for pid in known:
         if pid in text or pid.replace("-", " ") in text:
             if pid not in result:

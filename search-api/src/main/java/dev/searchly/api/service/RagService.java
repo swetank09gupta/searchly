@@ -4,7 +4,7 @@ import dev.searchly.api.client.EmbeddingClient;
 import dev.searchly.api.client.KnnSearchClient;
 import dev.searchly.api.client.OllamaClient;
 import dev.searchly.api.client.RerankClient;
-import dev.searchly.api.client.WarehouseAgentClient;
+import dev.searchly.api.client.IntelligenceAgentClient;
 import dev.searchly.api.service.QueryMetadataExtractor.QueryFilters;
 import dev.searchly.common.DocumentDto;
 import dev.searchly.common.SourceAuthority;
@@ -44,7 +44,7 @@ import java.util.regex.Pattern;
  *  7. Ollama generates a grounded answer
  *
  * The LLM answer therefore knows:
- *   "Customer sams-club-atlanta is running GreyMatter v6.0.5 + OGA v2.3.1 (prod).
+ *   "Customer acme-corp is running Platform v6.0.5 + ServiceAgent v2.3.1 (prod).
  *    Their operator-backend pod has 3 ERRORs in the last 10 min related to Redis.
  *    AES-891 is a known bug for this version, fixed in v2.3.2."
  */
@@ -71,19 +71,19 @@ public class RagService {
     private final KnnSearchClient knnClient;
     private final OllamaClient ollama;
     private final OpenSearchClient os;
-    private final WarehouseAgentClient warehouseAgent;
+    private final IntelligenceAgentClient intelligenceAgent;
     private final RerankClient reranker;
     private final QueryMetadataExtractor metadataExtractor;
 
     public RagService(EmbeddingClient embedder, KnnSearchClient knnClient,
                       OllamaClient ollama, OpenSearchClient os,
-                      WarehouseAgentClient warehouseAgent, RerankClient reranker,
+                      IntelligenceAgentClient intelligenceAgent, RerankClient reranker,
                       QueryMetadataExtractor metadataExtractor) {
         this.embedder = embedder;
         this.knnClient = knnClient;
         this.ollama = ollama;
         this.os = os;
-        this.warehouseAgent = warehouseAgent;
+        this.intelligenceAgent = intelligenceAgent;
         this.reranker = reranker;
         this.metadataExtractor = metadataExtractor;
     }
@@ -138,16 +138,16 @@ public class RagService {
                             String customer, String product, String env,
                             String sessionId, boolean ragOnly) throws IOException {
 
-        // ── Primary path: warehouse agent chat (ALL queries when enabled) ────
-        // ragOnly=true skips this path — used when the warehouse agent itself calls
+        // ── Primary path: intelligence agent chat (ALL queries when enabled) ────
+        // ragOnly=true skips this path — used when the intelligence agent itself calls
         // search_knowledge to avoid an infinite routing loop:
-        //   agent → gateway → search-api → warehouseAgent.chat() → agent → ...
-        if (!ragOnly && warehouseAgent.isEnabled()) {
+        //   agent → gateway → search-api → intelligenceAgent.chat() → agent → ...
+        if (!ragOnly && intelligenceAgent.isEnabled()) {
             try {
-                WarehouseAgentClient.AgentChatResult chat =
-                        warehouseAgent.chat(question, sessionId, customer, env, product);
+                IntelligenceAgentClient.AgentChatResult chat =
+                        intelligenceAgent.chat(question, sessionId, customer, env, product);
                 if (chat != null) {
-                    log.debug("Warehouse agent: ops={} clarify={} customer={} env={}",
+                    log.debug("Intelligence agent: ops={} clarify={} customer={} env={}",
                               chat.isOperational(), chat.needsClarification(),
                               chat.resolvedCustomer(), chat.resolvedEnv());
                     List<String> sources = chat.toolsCalled().stream()
@@ -160,7 +160,7 @@ public class RagService {
                             chat.hasLiveData(), List.of());
                 }
             } catch (Exception e) {
-                log.warn("Warehouse agent error, falling back to static RAG: {}", e.getMessage());
+                log.warn("Intelligence agent error, falling back to static RAG: {}", e.getMessage());
             }
         }
 
@@ -539,7 +539,7 @@ public class RagService {
     private String buildPrompt(String question, List<KnnSearchClient.ChunkHit> chunks,
                                 String customer, String product, String env) {
         StringBuilder sb = new StringBuilder();
-        sb.append("You are a GreyOrange warehouse intelligence assistant.\n");
+        sb.append("You are a Searchly intelligence assistant.\n");
         sb.append("Answer the question using ONLY the context provided below.\n");
         sb.append("Cite document titles and Jira issue keys when referencing them.\n");
         sb.append("If the context is insufficient, say so clearly.\n\n");

@@ -193,8 +193,8 @@ public class SearchService {
             }
         }
 
-        // --- leg 2: warehouse agent chat (with fuzzy resolution + live data) or static RAG ---
-        // hitsOnly=true skips the LLM synthesis — used by search_knowledge() in the warehouse agent
+        // --- leg 2: intelligence agent chat (with fuzzy resolution + live data) or static RAG ---
+        // hitsOnly=true skips the LLM synthesis — used by search_knowledge() in the intelligence agent
         // so it doesn't wait for Ollama when only the chunk hits are needed for its own synthesis.
         RagService.RagResult ragResult;
         if (hitsOnly) {

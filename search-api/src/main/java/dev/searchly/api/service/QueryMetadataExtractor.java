@@ -30,8 +30,8 @@ public class QueryMetadataExtractor {
     // ── Known service names ───────────────────────────────────────────────────
     private static final Pattern SERVICE_PATTERN = Pattern.compile(
             "\\b(operator[- ]backend|allocator|picker|induct(?:or)?|" +
-            "filebeat|oga|go-agent|rds|redis|kafka|opensearch|elastic|" +
-            "wms|greymatter|pick[- ]assist|gsb|rdc)\\b",
+            "filebeat|go-agent|rds|redis|kafka|opensearch|elastic|" +
+            "wms|core-platform|pick[- ]assist|solution-builder|rdc)\\b",
             Pattern.CASE_INSENSITIVE);
 
     // ── Source type signals ───────────────────────────────────────────────────

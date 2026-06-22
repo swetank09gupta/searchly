@@ -1,5 +1,5 @@
 """
-Chat Handler — the orchestration layer for multi-turn warehouse queries.
+Chat Handler — the orchestration layer for multi-turn operational queries.
 
 Every incoming message goes through this flow:
 
@@ -12,7 +12,7 @@ Every incoming message goes through this flow:
        "no" / other → retry with different candidate or ask for full input
        "walmart nj" → treat as a new hint and re-resolve
        "prod"       → set env
-       "pick-assist, greymatter" → treat as product list for new registration
+       "pick-assist, core-platform" → treat as product list for new registration
 
   3. CUSTOMER RESOLUTION
      Fuzzy-match the hint against the registry.
@@ -27,7 +27,7 @@ Every incoming message goes through this flow:
      If no env hint and customer has multiple → pick highest configured
 
   5. AGENT CALL
-     Run the warehouse agent with the resolved customer + env_config.
+     Run the agent with the resolved customer + env_config.
 
   6. SESSION UPDATE
      Persist resolved IDs, pending clarifications, conversation history.
@@ -52,7 +52,7 @@ from session import Session, SessionStore
 log = logging.getLogger(__name__)
 
 # Products we know about (used when guessing from question)
-KNOWN_PRODUCTS = ["pick-assist", "greymatter", "intralogistics", "gsb", "rdc", "wms", "sre"]
+KNOWN_PRODUCTS = ["pick-assist", "core-platform", "intralogistics", "solution-builder", "rdc", "wms", "sre"]
 
 
 class ChatHandler:
@@ -102,7 +102,7 @@ class ChatHandler:
         # Run regex first (instant). Only call the LLM (~500ms) if regex found something
         # new — a customer or env hint that differs from the current session. This avoids
         # the LLM call on pure follow-up turns ("what else could cause this?") while still
-        # correctly handling context switches ("what about GMI?" or "same for prod?").
+        # correctly handling context switches ("what about acme-corp?" or "same for prod?").
         from entity_extractor import _regex_extract
         quick = _regex_extract(message)
         session_customer = session.resolved_customer_id
@@ -480,7 +480,7 @@ class ChatHandler:
             # "no", "none of those" → ask for full clarification
             if _is_negative(msg_l) or "none" in msg_l:
                 ask = (
-                    "Got it. What's the full name of the customer or warehouse?\n\n"
+                    "Got it. What's the full name of the customer?\n\n"
                     "And which products do they use? Reply with the number(s):\n\n"
                     + product_menu()
                 )
@@ -635,7 +635,7 @@ class ChatHandler:
         existing = f"\nExisting summary:\n{session.rolling_summary}\n" if session.rolling_summary else ""
 
         prompt = (
-            "Analyze this warehouse support conversation and output TWO sections.\n\n"
+            "Analyze this support conversation and output TWO sections.\n\n"
             "SECTION 1 — PROSE SUMMARY:\n"
             "One paragraph summarizing what happened, what was found, and current status.\n\n"
             "SECTION 2 — STRUCTURED JSON (valid JSON only, no markdown):\n"
@@ -756,7 +756,7 @@ def _pick_candidate(msg: str, candidates: list[str], registry) -> str | None:
 
 def _extract_products(text: str) -> list[str]:
     found = []
-    for p in ["pick-assist", "greymatter", "intralogistics", "gsb", "rdc", "wms"]:
+    for p in ["pick-assist", "core-platform", "intralogistics", "solution-builder", "rdc", "wms"]:
         if p in text or p.replace("-", " ") in text:
             found.append(p)
     return found

@@ -23,8 +23,8 @@ import java.util.List;
  *   GET /api/v1/search?q=how+does+hungarian+allocation+work
  *
  *   # Operational query — any customer name spelling works
- *   GET /api/v1/search?q=why+is+robot+not+coming&customer=samsclub+atl
- *   GET /api/v1/search?q=operator+allocation+failing&customer=sam%27s+club+atlanta&env=prod
+ *   GET /api/v1/search?q=why+is+service+not+responding&customer=acme-corp
+ *   GET /api/v1/search?q=operator+allocation+failing&customer=acme-corp&env=prod
  *
  *   # Multi-turn (pass session back)
  *   GET /api/v1/search?q=what+about+staging&session=<id_from_prior_response>
@@ -32,7 +32,7 @@ import java.util.List;
  *   # New customer — system auto-registers through clarification dialog
  *   GET /api/v1/search?q=anything&customer=unknown+walmart+site
  *   → needs_clarification=true, answer asks which products they use
- *   GET /api/v1/search?q=pick-assist+and+greymatter&session=<id>
+ *   GET /api/v1/search?q=pick-assist+and+core-platform&session=<id>
  *   → customer auto-registered at solution stage, knowledge answer returned
  */
 @RestController

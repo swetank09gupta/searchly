@@ -13,10 +13,10 @@ so it survives restarts and can be inspected/edited by hand if needed.
 
 API shape (per customer):
   {
-    "id":              "sams-club-atlanta",
+    "id":              "acme-corp",
     "name":            "Sam's Club — Atlanta DC",
     "lifecycle_stage": "prod",              # current highest reached stage
-    "products":        ["pick-assist", "greymatter"],
+    "products":        ["pick-assist", "core-platform"],
     "notes":           "Multi-bot RRoLS flow",
     "environments": {
       "dev": {
@@ -25,7 +25,7 @@ API shape (per customer):
         "k8s_namespace": "default",
         "pod_map": {                         # pod_prefix → product name
           "operator-backend": "pick-assist",
-          "greymatter": "greymatter"
+          "core-platform": "core-platform"
         }
       },
       "test":    { ... },
@@ -209,7 +209,7 @@ class CustomerRegistry:
         Mode A — bastion-kubectl (zero credential storage, DEFAULT):
           The agent SSHes to the bastion, fetches the ES password at runtime
           from the k8s Secret, and execs curl inside a Filebeat pod.
-          Works for all GreyOrange ECK deployments with only k8s_bastion set.
+          Works for all ECK deployments with only k8s_bastion set.
           elastic_k8s_ns     — namespace where ECK runs (default: elastic-system)
           elastic_k8s_secret — k8s Secret name (default: gm-elasticsearch-es-elastic-user)
           elastic_k8s_svc    — ES ClusterIP Service (default: gm-elasticsearch-es-http)

@@ -162,7 +162,7 @@ These are architectural weaknesses that are understood and scheduled, ordered by
 | 2 | Knowledge graph extraction not wired — graph is empty | High | 2.2–2.3 | KG tables + API exist; `connectors/sync.py` never updated; start with Jira remote links (authoritative) |
 | 3 | 6 retrieval legs run as sequential HTTP calls | High | 1.1 | ~300ms recoverable; fix: `CompletableFuture.allOf()` in `RagService.answer()` |
 | 4 | Recency boost missing from chunk BM25 | Medium | 1.2 | `SearchService` applies Gauss decay to `documents-*` BM25; `RagService.bm25Internal()` uses plain `match` |
-| 5 | Sessions in-memory — blocks horizontal scaling of warehouse-agent | Medium | 1.3 | `SessionStore` is a dict; swap to Redis hashes + TTL (~30-line change) |
+| 5 | Sessions in-memory — blocks horizontal scaling of intelligence-agent | Medium | 1.3 | `SessionStore` is a dict; swap to Redis hashes + TTL (~30-line change) |
 | 6 | No embedding version migration path | Medium | Backlog | Model upgrades require full re-embed; need versioned index aliases strategy |
 | 7 | No production query log → eval feedback loop | Medium | 4.1 | Eval dataset has 5 questions; no loop from real user queries |
 | 8 | `Kafka max.poll.records` unbounded | Medium | 3.2 | Default 500; a burst of large documents can OOM the indexer; set to 10 + semaphore |

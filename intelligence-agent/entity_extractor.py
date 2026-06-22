@@ -1,14 +1,14 @@
 """
 Entity Extractor — uses the LLM to pull structured info from a question.
 
-Given: "why is robot 42 not coming in samsclub atlanta prod?"
+Given: "why is service X not responding in customer-a prod?"
 Returns:
   {
-    "customer_hint": "samsclub atlanta",
+    "customer_hint": "customer-a",
     "env_hint":      "prod",
     "product_hint":  null,
-    "entity_ids":    ["robot 42"],
-    "intent":        "robot_status"
+    "entity_ids":    ["X"],
+    "intent":        "system_error"
   }
 
 This runs a quick single-shot Ollama call (~0.5s) before the main agent loop,
@@ -28,14 +28,14 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-_EXTRACT_PROMPT = """Extract structured information from this warehouse support question.
+_EXTRACT_PROMPT = """Extract structured information from this support question.
 Output ONLY valid JSON with these fields (use null if not found):
 {
-  "customer_hint": "the customer/warehouse name or abbreviation mentioned",
+  "customer_hint": "the customer name or abbreviation mentioned",
   "env_hint": "dev | testing | staging | prod (if mentioned)",
-  "product_hint": "pick-assist | greymatter | intralogistics | etc. (if mentioned)",
-  "entity_ids": ["list of specific IDs: order IDs, robot IDs, operator IDs"],
-  "intent": "order_status | robot_status | task_allocation | system_error | deployment | general"
+  "product_hint": "pick-assist | core-platform | intralogistics | etc. (if mentioned)",
+  "entity_ids": ["list of specific IDs: order IDs, asset IDs, operator IDs"],
+  "intent": "order_status | asset_status | task_allocation | system_error | deployment | general"
 }
 
 Question: {question}
@@ -62,7 +62,7 @@ _ENV_MAP = {
     "development": "dev", "dev": "dev",
 }
 
-_FALLBACK_PRODUCTS = ["pick-assist", "greymatter", "intralogistics", "gsb", "rdc", "wms", "sre", "ai-ml"]
+_FALLBACK_PRODUCTS = ["pick-assist", "core-platform", "intralogistics", "solution-builder", "rdc", "wms", "sre", "ai-ml"]
 
 
 def _known_products() -> list[str]:
@@ -135,8 +135,8 @@ def _regex_extract(question: str) -> dict[str, Any]:
     customer_m = _CUSTOMER_HINTS.search(question)
     customer_hint = customer_m.group(1).strip() if customer_m else None
     if customer_hint:
-        # Truncate at the first English function word — prevents "GMI is in terms of"
-        # from a query like "WES project for GMI is in terms of development?"
+        # Truncate at the first English function word — prevents "Acme is in terms of"
+        # from a query like "project for Acme is in terms of development?"
         customer_hint = _trim_at_stopword(customer_hint)
         if customer_hint:
             customer_hint = re.sub(

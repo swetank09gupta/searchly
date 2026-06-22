@@ -1,16 +1,16 @@
 """
-Warehouse Agent Service — FastAPI
+Intelligence Agent Service — FastAPI
 
 PRIMARY ENDPOINT (this is what the search-api calls):
   POST /api/v1/chat
-    { "message": "why is my robot not coming?", "session_id": "...",
-      "customer": "samsclub atl",   ← fuzzy, auto-resolved
+    { "message": "why is service X not responding?", "session_id": "...",
+      "customer": "acme corp",   ← fuzzy, auto-resolved
       "env": "prod",                ← optional, extracted from message if absent
       "product": "pick-assist" }
     →
     { "session_id": "...",          ← keep and pass back for multi-turn
       "answer": "...",
-      "resolved_customer": "sams-club-atlanta",
+      "resolved_customer": "acme-corp",
       "resolved_env": "prod",
       "lifecycle_stage": "prod",
       "needs_clarification": false  ← if true, answer IS a question for the user }
@@ -61,7 +61,7 @@ log = logging.getLogger(__name__)
 OLLAMA_URL      = os.getenv("OLLAMA_URL",      "http://ollama:11434")
 OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL",    "llama3.2:3b")
 SEARCHLY_URL    = os.getenv("SEARCHLY_URL",    "http://gateway:8080")
-SEARCHLY_TENANT = os.getenv("SEARCHLY_TENANT", "greyorange")
+SEARCHLY_TENANT = os.getenv("SEARCHLY_TENANT", "default")
 CUSTOMERS_YML   = os.getenv("CUSTOMERS_YML",   "/app/customers.yml")
 CUSTOMERS_DB    = os.getenv("CUSTOMERS_DB",    "/app/data/customers_db.json")
 AUTH_DB_PATH    = os.getenv("AUTH_DB",         "/app/data/auth_db.json")
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
         ollama_model = OLLAMA_MODEL,
     )
     eval_sched.start()
-    log.info("Warehouse agent ready  ollama=%s  model=%s  customers=%d  auth=%s",
+    log.info("Intelligence agent ready  ollama=%s  model=%s  customers=%d  auth=%s",
              OLLAMA_URL, OLLAMA_MODEL, len(registry.list_customers()),
              "on" if AUTH_ENABLED else "off")
     yield
@@ -128,11 +128,11 @@ def _require_key(request: Request) -> dict:
 
 
 app = FastAPI(
-    title="GreyOrange Warehouse Intelligence Agent",
+    title="Searchly Intelligence Agent",
     version="3.0.0",
     description=(
-        "Conversational warehouse intelligence — self-registers customers and envs "
-        "through chat, resolves 'samsclub atl' → 'sams-club-atlanta' automatically, "
+        "Conversational operational intelligence — self-registers customers and envs "
+        "through chat, resolves fuzzy customer names automatically, "
         "queries live k8s clusters, and answers from code + Jira + Confluence."
     ),
     lifespan=lifespan,
@@ -195,7 +195,7 @@ class UpsertEnvRequest(BaseModel):
     pod_map:       dict[str, str] = Field(default_factory=dict)
 
     # ── Elasticsearch — Mode A: bastion-kubectl (zero credential storage) ──────
-    # Default for all GreyOrange ECK deployments. The agent fetches the ES password
+    # Default for ECK deployments. The agent fetches the ES password
     # at runtime from the k8s Secret via bastion SSH, then execs curl inside a
     # Filebeat pod. No password stored anywhere in config.
     elastic_k8s_ns:     str = Field(
@@ -225,13 +225,13 @@ class UpsertEnvRequest(BaseModel):
 
     # ── Elasticsearch — Mode B: direct HTTP (external URL + credentials) ───────
     # Only needed when ES is exposed externally via ingress + API key or password.
-    # Most GreyOrange envs don't need this — Mode A (above) works automatically.
+    # Most envs don't need this — Mode A (above) works automatically.
     elastic_url:       str = Field(
         "",
         description=(
             "External Elasticsearch API endpoint. "
             "Leave empty to use bastion-kubectl mode (recommended). "
-            "Example: https://pickassistsim-es.greymatter.greyorange.com"
+            "Example: https://my-cluster-es.internal.example.com"
         ),
     )
     elastic_api_key:   str = Field("", description="ES API key (Mode B only)")
@@ -333,7 +333,7 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> ChatResponse:
         result["answer"] = (
             "I'm sorry — your current credentials don't have access to "
             f"**{resolved_customer}**'s data.\n\n"
-            "Please contact your GreyOrange administrator to request access, "
+            "Please contact your Searchly administrator to request access,"
             "or ask about a different customer."
         )
         result["resolved_customer"] = None
@@ -378,7 +378,7 @@ async def chat_stream_endpoint(req: ChatRequest, request: Request):
                             "answer": (
                                 "I'm sorry — your current credentials don't have access to "
                                 f"**{resolved_customer}**'s data.\n\n"
-                                "Please contact your GreyOrange administrator to request access."
+                                "Please contact your Searchly administrator to request access."
                             ),
                             "resolved_customer": None,
                             "resolved_env":      None,
@@ -531,7 +531,7 @@ class CreateKeyRequest(BaseModel):
         description=(
             'List of customer IDs this key can access. '
             'Use ["*"] for full access (admin). '
-            'Use ["sams-club-atlanta"] to restrict to one customer.'
+            'Use ["acme-corp"] to restrict to one customer.'
         ),
     )
     is_admin: bool = False
@@ -558,14 +558,14 @@ async def create_auth_key(req: CreateKeyRequest,
     It cannot be recovered after this call.
 
     Examples:
-      # Full access (GreyOrange admin / solution engineer)
+      # Full access (admin / solution engineer)
       {"name": "Alice (Solution)", "allowed_customers": ["*"]}
 
       # Customer-scoped (lock to one customer)
-      {"name": "Sam's Club ATL ops", "allowed_customers": ["sams-club-atlanta"]}
+      {"name": "Sam's Club ATL ops", "allowed_customers": ["acme-corp"]}
 
       # Multi-customer (e.g. regional manager)
-      {"name": "APAC manager", "allowed_customers": ["sams-club-atlanta", "sams-club-canada"]}
+      {"name": "APAC manager", "allowed_customers": ["acme-corp", "acme-corp-canada"]}
     """
     key_record = _require_key(request)
     if not key_record.get("is_admin"):

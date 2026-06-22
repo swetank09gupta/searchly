@@ -1,5 +1,5 @@
 """
-Warehouse Intelligence Agent — lifecycle-aware agentic loop.
+Searchly Intelligence Agent — lifecycle-aware agentic loop.
 
 Lifecycle stages affect the agent's behaviour:
 
@@ -11,10 +11,10 @@ Lifecycle stages affect the agent's behaviour:
              Typical questions: "why is task X not allocating in dev?"
 
   testing  → Same as dev but pointed at test cluster.
-             Typical questions: "we're failing E2E test Y — what does the OGA log show?"
+             Typical questions: "we're failing E2E test Y — what does the service log show?"
 
   staging  → Pre-prod.  Full live data.
-             Typical questions: "staging shows allocator crashing on scenario Z"
+             Typical questions: "staging shows service crashing on scenario Z"
 
   prod     → Full live data, phrasing emphasises "this is production, be careful".
 """
@@ -56,9 +56,9 @@ def _is_operational(question: str) -> bool:
 def _system_prompt(customer_record: dict | None, env_config: dict | None,
                    env_name: str | None, product: str | None) -> str:
     lines = [
-        "You are a GreyOrange warehouse intelligence assistant.",
-        "Your role is to answer questions about warehouse operations, robot behaviour,",
-        "order allocation, software versions, and system errors.",
+        "You are a Searchly intelligence assistant.",
+        "Your role is to answer questions about operational issues, system behaviour,",
+        "task allocation, software versions, and service errors.",
         "",
     ]
 
@@ -140,7 +140,7 @@ async def run_agent(
     searchly_tenant: str,
 ) -> dict[str, Any]:
     """
-    Run the warehouse agent.
+    Run the intelligence agent.
 
     Returns:
       { answer, tools_called, tool_results, is_operational, env_used }

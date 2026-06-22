@@ -16,20 +16,20 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * HTTP client for the Python warehouse-agent /api/v1/chat endpoint.
+ * HTTP client for the Python intelligence-agent /api/v1/chat endpoint.
  * Protected by a circuit breaker so agent timeouts don't cascade to search.
  */
 @Component
-public class WarehouseAgentClient {
-    private static final Logger log = LoggerFactory.getLogger(WarehouseAgentClient.class);
+public class IntelligenceAgentClient {
+    private static final Logger log = LoggerFactory.getLogger(IntelligenceAgentClient.class);
 
     private final String agentUrl;
     private final ObjectMapper mapper;
     private final HttpClient http;
     private final boolean enabled;
 
-    public WarehouseAgentClient(
-            @Value("${searchly.warehouse-agent.url:}") String agentUrl,
+    public IntelligenceAgentClient(
+            @Value("${searchly.intelligence-agent.url:}") String agentUrl,
             ObjectMapper mapper) {
         this.agentUrl = agentUrl;
         this.mapper = mapper;
@@ -39,14 +39,14 @@ public class WarehouseAgentClient {
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
         if (this.enabled)
-            log.info("Warehouse agent enabled at {}", agentUrl);
+            log.info("Intelligence agent enabled at {}", agentUrl);
         else
-            log.info("Warehouse agent not configured — operational queries use static RAG only");
+            log.info("Intelligence agent not configured — operational queries use static RAG only");
     }
 
     public boolean isEnabled() { return enabled; }
 
-    @CircuitBreaker(name = "warehouseAgent", fallbackMethod = "chatFallback")
+    @CircuitBreaker(name = "intelligenceAgent", fallbackMethod = "chatFallback")
     @SuppressWarnings("unchecked")
     public AgentChatResult chat(String message, String sessionId,
                                 String customer, String env, String product) throws Exception {
@@ -68,7 +68,7 @@ public class WarehouseAgentClient {
 
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() != 200) {
-            throw new RuntimeException("Warehouse agent HTTP " + resp.statusCode() + ": "
+            throw new RuntimeException("Intelligence agent HTTP " + resp.statusCode() + ": "
                     + resp.body().substring(0, Math.min(300, resp.body().length())));
         }
 
@@ -91,7 +91,7 @@ public class WarehouseAgentClient {
     private AgentChatResult chatFallback(String message, String sessionId,
                                           String customer, String env, String product,
                                           Throwable t) {
-        log.warn("Warehouse agent circuit open or failed — falling back to static RAG: {}", t.getMessage());
+        log.warn("Intelligence agent circuit open or failed — falling back to static RAG: {}", t.getMessage());
         return null;
     }
 

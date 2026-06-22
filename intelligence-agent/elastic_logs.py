@@ -1,12 +1,12 @@
 """
 Elasticsearch Log Client — queries customer log stores.
 
-GreyOrange ships pod logs via Filebeat → Logstash → Elasticsearch.
+Pod logs are shipped via Filebeat → Logstash → Elasticsearch.
 Each env has its own ES cluster (ECK — Elastic Cloud on Kubernetes).
 
 ─── Two query modes ────────────────────────────────────────────────────────────
 
-MODE A: Bastion-kubectl (zero credential storage — DEFAULT for GreyOrange envs)
+MODE A: Bastion-kubectl (zero credential storage — DEFAULT)
   The ES password lives in a k8s Secret. We fetch it at query time via the
   bastion SSH + kubectl, then exec a curl inside a Filebeat pod that already
   has network access to the ES ClusterIP.

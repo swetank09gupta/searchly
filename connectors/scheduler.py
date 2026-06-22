@@ -13,7 +13,7 @@ Two tracks — very different purposes:
           With 10 customers × 3 envs = 30 SSH calls. Takes ~30s total.
 
   NOT logs. Logs are never pre-indexed — they are fetched LIVE by the
-  warehouse-agent's get_pod_logs tool when a user asks an operational
+  intelligence agent's get_pod_logs tool when a user asks an operational
   question. This gives always-current data with zero storage cost.
 
   TRACK B — Shared knowledge (Jira + Confluence + GitHub repos)

@@ -1,5 +1,5 @@
 """
-Searchly Connector — GreyOrange Multi-Product, Multi-Customer Intelligence
+Searchly Connector — Multi-Product, Multi-Customer Intelligence
 
 WHAT IT INDEXES
 ───────────────
@@ -15,11 +15,11 @@ WHAT IT INDEXES
 
 HOW SEARCH WORKS AFTER THIS
 ────────────────────────────
-  GET /api/v1/search?q=why+is+operator+stuck&customer=sams-club-atlanta
+  GET /api/v1/search?q=why+is+operator+stuck&customer=acme-corp
 
   The LLM answer gets two layers of context:
     1. Shared: relevant code + Jira tickets + Confluence docs
-    2. Customer: "they run GreyMatter v6.0.5 + OGA v2.3.1 in prod,
+    2. Customer: "they run Platform v6.0.5 + ServiceAgent v2.3.1 in prod,
        operator-backend has 3 ERROR lines in the last 10 min, see AES-891
        which is a known allocation bug fixed in v2.3.2"
 
@@ -343,9 +343,9 @@ def _signal_branches(extra: list[str]) -> list[str]:
 
 # Known environment suffixes used in deployment repo branch names.
 # Branch convention: {customer-id}-{env}
-#   sams-club-prod          → customer=sams-club,         env=prod
-#   sams-club-atlanta-prod  → customer=sams-club-atlanta,  env=prod
-#   sodimac-colombia-staging → customer=sodimac-colombia,  env=staging
+#   acme-corp-prod          → customer=acme-corp,         env=prod
+#   acme-corp-prod  → customer=acme-corp,  env=prod
+#   globex-latam-staging → customer=globex-latam,  env=staging
 # Location is part of the customer ID, NOT a separate field.
 _BRANCH_ENV_SUFFIXES = {
     "prod":        "prod",
@@ -364,7 +364,7 @@ _BRANCH_ENV_SUFFIXES = {
 
 # Devops repos only index branches that represent real deployment environments.
 # Matches: develop, master, main, and any branch ending with a known env suffix
-# (e.g. sodimac-colombia-prod, sams-club-atlanta-staging).
+# (e.g. globex-latam-prod, acme-corp-staging).
 # Ticket branches (GM-*, AE-*), version tags (7.3.0.2), archive/* etc. are skipped.
 _DEVOPS_SIGNAL_RE = re.compile(
     r"^(develop|master|main)$"
@@ -395,7 +395,7 @@ def _parse_customer_branch(branch_name: str) -> tuple[str, str] | None:
 
 
 def _customer_name_from_id(customer_id: str) -> str:
-    """Turn a kebab-case ID into a display name: sams-club-atlanta → Sams Club Atlanta."""
+    """Turn a kebab-case ID into a display name: acme-corp → Sams Club Atlanta."""
     return " ".join(w.capitalize() for w in customer_id.replace("-", " ").split())
 
 
@@ -423,7 +423,7 @@ class Config:
     git_branches: list = field(default_factory=list)
     # Deployment/DevOps repos whose branches represent live customer environments.
     # All non-feature branches are indexed; branch names are parsed for customer discovery.
-    # Example: greyorange/greymatter-deployment,greyorange/pick-assist-helm-charts
+    # Example: myorg/deployment-repo,myorg/helm-charts
     devops_repos: list = field(default_factory=list)
     # Intelligence agent URL — used to auto-register customers/envs discovered
     # from deployment repo branches. Leave blank to skip auto-registration.
@@ -1069,9 +1069,9 @@ class RepoIndexer:
           - "https://github.com/..."  → full URL
 
         Branch naming convention: {customer-id}-{env}
-          sams-club-prod          → (sams-club, prod)
-          sams-club-atlanta-prod  → (sams-club-atlanta, prod)
-          sodimac-colombia-staging → (sodimac-colombia, staging)
+          acme-corp-prod          → (acme-corp, prod)
+          acme-corp-prod  → (acme-corp, prod)
+          globex-latam-staging → (globex-latam, staging)
         Location tokens (atlanta, colombia, …) are part of the customer ID.
 
         First-seen branches older than DEVOPS_STALE_DAYS (default 60) are not
@@ -1621,7 +1621,7 @@ class RepoIndexer:
 # ---------------------------------------------------------------------------
 #
 # POD LOGS ARE NOT STORED HERE.
-# Logs are a live stream — they are fetched on-demand by the warehouse-agent's
+# Logs are a live stream — they are fetched on-demand by the intelligence agent's
 # get_pod_logs tool at query time (always current, zero storage cost).
 # Only deployment state (image tags = which version is running) is indexed,
 # because versions change rarely (once per release) and are useful for
@@ -1633,9 +1633,9 @@ class CustomerDeployFetcher:
     configured environments.
 
     One OpenSearch document per (customer, env), e.g.:
-      "[DeploymentState] Sams Club Atlanta — prod
-       operator-backend: v2.3.1 (3/3 pods)
-       greymatter: v6.0.5 (2/2 pods)"
+      "[DeploymentState] Acme Corp — prod
+       core-service: v2.3.1 (3/3 pods)
+       core-platform: v6.0.5 (2/2 pods)"
 
     Handles the new multi-env registry format:
       environments:
@@ -1870,7 +1870,7 @@ class JiraFetcher:
     def _load_customer_index(self, agent_url: str) -> dict[str, str]:
         """Build {lowercase_token -> customer_id} from the intelligence-agent registry.
         Each customer's ID, name words, and aliases are indexed so that Jira custom field
-        values like 'GMI (Social Circle, GA, USA)' resolve to 'gmi'.
+        values like 'Acme Corp (New York, USA)' resolve to 'acme-corp'.
         Falls back to empty dict if the agent is unreachable."""
         try:
             r = requests.get(f"{agent_url}/api/v1/customers", timeout=10)
@@ -1907,7 +1907,7 @@ class JiraFetcher:
                 continue
             for val in vals:
                 # Slide a window over the words in the value to find customer matches.
-                # "GMI (Social Circle, GA, USA)" → tokens ["gmi","social","circle","ga","usa"]
+                # "Acme Corp (New York, USA)" → tokens ["acme","corp","new","york","usa"]
                 tokens = re.split(r"[\s\-_/(,)]+", val.lower())
                 for tok in tokens:
                     if len(tok) >= 2 and tok in self._customer_index:
@@ -2397,7 +2397,7 @@ def _merge_small(chunks: list, min_chars: int = 200) -> list:
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="GreyOrange Searchly Connector")
+    parser = argparse.ArgumentParser(description="Searchly Connector")
     parser.add_argument("--only", choices=["shared", "jira", "confluence", "repos",
                                            "customer", "all-customers",
                                            "all-customers-deploy"],

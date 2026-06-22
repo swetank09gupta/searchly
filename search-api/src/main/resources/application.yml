@@ -45,10 +45,10 @@ searchly:
   ollama:
     url: ${OLLAMA_URL:http://localhost:11434}
     model: ${OLLAMA_MODEL:llama3.2:3b}
-  # Python warehouse agent — handles live operational queries (kubectl logs, deployment state)
+  # Python intelligence agent — handles live operational queries (kubectl logs, deployment state)
   # Leave blank to disable and use static RAG only.
-  warehouse-agent:
-    url: ${WAREHOUSE_AGENT_URL:}
+  intelligence-agent:
+    url: ${INTELLIGENCE_AGENT_URL:}
 
 resilience4j:
   circuitbreaker:
@@ -70,7 +70,7 @@ resilience4j:
         minimumNumberOfCalls: 5
       knnSearch:
         baseConfig: default
-      warehouseAgent:
+      intelligenceAgent:
         baseConfig: default
       reranker:
         baseConfig: default

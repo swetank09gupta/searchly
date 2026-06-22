@@ -6,8 +6,8 @@ Keys are stored in {DATA_DIR}/auth_db.json alongside customers_db.json.
 Key record:
   {
     "key":               "sk-go-...",
-    "name":              "GreyOrange Admin",
-    "allowed_customers": ["*"],        # "*" = all; or ["sams-club-atlanta", ...]
+    "name":              "Searchly Admin",
+    "allowed_customers": ["*"],        # "*" = all; or ["acme-corp", ...]
     "is_admin":          true,         # can create/delete other keys
     "created_at":        "2026-..."
   }

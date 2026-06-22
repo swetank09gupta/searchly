@@ -130,7 +130,7 @@ services:
   #   POST   /api/v1/agent/answer
   intelligence-agent:
     build:
-      context: ../warehouse-agent
+      context: ../intelligence-agent
       dockerfile: Dockerfile
     environment:
       OLLAMA_URL:      http://ollama:11434
@@ -183,7 +183,7 @@ services:
       OLLAMA_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
       # Intelligence agent URL — enables live operational query routing
-      WAREHOUSE_AGENT_URL: http://intelligence-agent:8084
+      INTELLIGENCE_AGENT_URL: http://intelligence-agent:8084
     ports: ["8081:8081"]
     deploy:
       resources:

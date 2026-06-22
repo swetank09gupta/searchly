@@ -98,8 +98,8 @@ These are **analytical estimates**, not `ab` numbers. The RAG pipeline on a CPU-
 | Cross-encoder rerank (30 pairs) | 300 ms | 800 ms | bge-reranker-base, CPU |
 | Ollama generate | 4000 ms | 12000 ms | llama3.2:3b, CPU |
 | **Total (knowledge-only, no agent)** | **~5 s** | **~15 s** | Cache miss, no live tools |
-| **Total (warehouse agent + live logs)** | **~30 s** | **~120 s** | SSH bastion + ES query adds 2–4s/tool call |
+| **Total (intelligence agent + live logs)** | **~30 s** | **~120 s** | SSH bastion + ES query adds 2–4s/tool call |
 
-The 120s Ollama timeout is the hard ceiling for warehouse agent queries with multiple tool rounds.
+The 120s Ollama timeout is the hard ceiling for intelligence agent queries with multiple tool rounds.
 At 100 concurrent users, Ollama saturates at ~3 in-flight requests on a 4-core CPU. Production
 scale requires a GPU node (`A10G` is sufficient) or an async LLM queue.

@@ -18,8 +18,8 @@ These three are independent, can be done in parallel, and require no schema chan
 **Fix:** Add `function_score` wrapper to `bm25Internal()` matching the pattern in `SearchService`. **Important:** `created_at` is mapped as `long` (epoch millis), NOT `date`. Use numeric epoch origin (`System.currentTimeMillis()`) and numeric scale (`30L * 24 * 60 * 60 * 1000` ms). Do NOT use `"now/d"` date-math — it only works on `date` type fields and will produce "all shards failed".  
 **Files:** `RagService.bm25Internal()` — 15-line change, pattern identical to `SearchService` lines 90–104.
 
-### S1.3 — Redis Session Store for Warehouse Agent  `warehouse-agent/session.py`
-**Why:** `SessionStore` is an in-memory dict. Horizontal scaling of warehouse-agent is architecturally impossible.  
+### S1.3 — Redis Session Store for Intelligence Agent  `intelligence-agent/session.py`
+**Why:** `SessionStore` is an in-memory dict. Horizontal scaling of intelligence-agent is architecturally impossible.  
 **Fix:** Replace the dict with Redis hash keys (`session:{id}`) + TTL expiry. `Session` dataclass serializes to JSON already. The public interface (`get_or_create`, `get`) stays identical — only the storage backend changes.  
 **Files:** `session.py` (~30 lines), `requirements.txt` (redis-py already in ecosystem).
 
@@ -86,7 +86,7 @@ Set `max.poll.records=10` in `indexer/src/main/resources/application.yml`.
 |---|---|
 | Embedding version migration path (versioned index aliases) | High effort, no urgent need until model upgrade |
 | Commit ↔ Service path heuristics in KG | Depends on consistent monorepo layout — validate with team first |
-| Deployment ↔ Service KG from k8s labels | Needs warehouse-agent to call KG API on each deployment scan |
+| Deployment ↔ Service KG from k8s labels | Needs intelligence-agent to call KG API on each deployment scan |
 | Ollama async queue + streaming | High effort, major architecture change |
 | HNSW quantization (fp16) for >5M chunks | Not yet near this scale |
 | Jira incremental sync (updatedDate filter) | 150ms pacing handles it for now; revisit at >50K issues |

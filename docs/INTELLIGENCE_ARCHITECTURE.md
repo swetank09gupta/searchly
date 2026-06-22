@@ -404,5 +404,5 @@ The current design is single-node CPU-only to enable zero-cost self-hosting.
 2. **Knowledge graph is empty** — KG storage layer exists (`kg_entities`, `kg_relationships`) but `connectors/sync.py` was not updated. Jira remote links wiring is Sprint 2.2.
 3. **Retrieval legs sequential** — 6 HTTP calls run in series; ~300ms recoverable (Sprint 1.1).
 4. **Chunk BM25 recency boost missing** — `RagService.bm25Internal()` uses plain match; `SearchService` documents-* BM25 has Gauss decay (numeric epoch origin). Same fix needed for chunks (Sprint 1.2). Use `System.currentTimeMillis()` as origin, NOT `now/d` — `created_at` is `long`, not `date`.
-5. **Sessions in-memory** — warehouse-agent cannot scale horizontally (Sprint 1.3).
+5. **Sessions in-memory** — intelligence-agent cannot scale horizontally (Sprint 1.3).
 6. **No production query log** — eval dataset has 5 sample questions; no feedback loop from real queries (Sprint 4.1).

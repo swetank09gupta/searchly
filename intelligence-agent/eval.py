@@ -1,5 +1,5 @@
 """
-Evaluation framework for the warehouse agent (P2.5).
+Evaluation framework for the intelligence agent (P2.5).
 
 Runs a test dataset of question/expected_sources/expected_answer triples against
 the live agent and reports:
@@ -14,10 +14,10 @@ Dataset format (eval_dataset.json):
 [
   {
     "id": "q001",
-    "question": "Why is the allocator crashing on customer sams-club-atlanta in prod?",
+    "question": "Why is the allocator crashing on customer acme-corp in prod?",
     "expected_sources": ["AES-891", "operator-backend"],
     "expected_answer_keywords": ["redis", "connection", "timeout"],
-    "customer": "sams-club-atlanta",
+    "customer": "acme-corp",
     "env": "prod"
   },
   ...
@@ -245,7 +245,7 @@ async def run_eval(base_url: str, tenant: str, dataset_path: str,
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    parser = argparse.ArgumentParser(description="Warehouse agent evaluator")
+    parser = argparse.ArgumentParser(description="Intelligence agent evaluator")
     parser.add_argument("--url",     default="http://localhost:8084", help="Agent base URL")
     parser.add_argument("--tenant",  default="demo-tenant")
     parser.add_argument("--dataset", default=DEFAULT_DATASET)

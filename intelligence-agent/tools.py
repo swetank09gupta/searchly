@@ -1,5 +1,5 @@
 """
-Warehouse Agent Tools — tenant-isolated live data queries.
+Searchly Agent Tools — tenant-isolated live data queries.
 
 All tools receive `customer_obj` injected by agent.py at runtime.
 The LLM never supplies credentials — only intent (service name, time range, etc.).
@@ -7,8 +7,7 @@ The LLM never supplies credentials — only intent (service name, time range, et
 Log architecture:
   Pods have minimal rolling logs (last ~100 lines).
   Full logs are shipped via Logstash → Elasticsearch.
-  The Kibana UI at https://<env>-logviewer.greymatter.greyorange.com/app/discover
-  sits in front of that ES cluster.
+  A Kibana UI sits in front of that ES cluster for manual inspection.
 
   We query Elasticsearch directly via its REST API.
   Each customer env config has:
@@ -149,7 +148,7 @@ async def get_logs(
     MODE A (bastion-kubectl) — used when no elastic_url is configured.
       Fetches the ES password at runtime from the k8s Secret via bastion SSH,
       then execs a curl inside a Filebeat pod. Zero credentials stored anywhere.
-      Works for ALL GreyOrange ECK deployments with only k8s_bastion configured.
+      Works for all ECK deployments with only k8s_bastion configured.
 
     MODE B (direct HTTP) — used when elastic_url is set in env config.
       Queries ES REST API directly using stored credentials.
@@ -158,7 +157,7 @@ async def get_logs(
 
     Args:
       service   — service/pod name prefix: "operator-backend", "pick-assist",
-                  "mission-manager", "greymatter", "il-server", "redis", etc.
+                  "mission-manager", "core-service", "il-server", "redis", etc.
       minutes   — look-back window (default 30, max practical: 1440 = 24h)
       level     — filter by level: "ERROR", "WARN", "INFO", "DEBUG"
       grep      — free-text search in the message field
@@ -317,7 +316,7 @@ async def query_kg(
       - Which Jira tickets a PR references (pull_request --[references]--> jira_issue)
 
     entity_type: "jira_issue" | "pull_request" | "service" | "deployment" | "customer"
-    entity_id:   e.g. "AES-891", "pick-assist#234", "pick-assist", "sams-club-atlanta/prod"
+    entity_id:   e.g. "AES-891", "pick-assist#234", "pick-assist", "acme-corp/prod"
     depth:       how many hops to traverse (1–5, default 3)
     """
     headers = {"X-Tenant-ID": tenant, "X-Tenant-Tier": "SHARED"}
@@ -408,7 +407,7 @@ TOOL_DEFINITIONS = [
                 "Full logs are shipped from pods → Logstash → Elasticsearch — "
                 "this is the primary log source, not kubectl. "
                 "Use for: errors, exceptions, slow queries, allocation issues, "
-                "robot not responding, order stuck. "
+                "service not responding, task stuck. "
                 "Always try with level='ERROR' first, then widen if needed."
             ),
             "parameters": {
@@ -419,7 +418,7 @@ TOOL_DEFINITIONS = [
                         "description": (
                             "Service / pod name prefix to filter on. "
                             "Examples: 'operator-backend', 'pick-assist', "
-                            "'mission-manager', 'greymatter', 'il-server', "
+                            "'mission-manager', 'core-service', 'il-server',"
                             "'redis', 'postgres'. "
                             "Omit to get logs from ALL services in the namespace."
                         ),
@@ -445,8 +444,8 @@ TOOL_DEFINITIONS = [
                         "type": "string",
                         "description": (
                             "Free-text search in log messages. "
-                            "Examples: 'robot 42', 'ORD-9182', 'timeout', "
-                            "'allocat', 'mission', 'Hungarian'."
+                            "Examples: 'ORD-9182', 'timeout', 'allocat', "
+                            "'mission', 'Hungarian', 'connection refused'."
                         ),
                     },
                     "max_lines": {
@@ -509,7 +508,7 @@ TOOL_DEFINITIONS = [
                     "query":   {"type": "string"},
                     "product": {
                         "type": "string",
-                        "description": "Narrow to a product: pick-assist, greymatter, intralogistics, etc.",
+                        "description": "Narrow to a product: pick-assist, core-platform, intralogistics, etc.",
                     },
                 },
                 "required": ["query"],
@@ -537,7 +536,7 @@ TOOL_DEFINITIONS = [
                     },
                     "entity_id": {
                         "type": "string",
-                        "description": "e.g. 'AES-891', 'pick-assist#234', 'sams-club-atlanta/prod'",
+                        "description": "e.g. 'AES-891', 'pick-assist#234', 'acme-corp/prod'",
                     },
                     "depth": {
                         "type": "integer",

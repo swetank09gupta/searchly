@@ -4,12 +4,12 @@ Fuzzy Customer + Environment Resolver
 Translates messy natural-language references into registry IDs.
 
 Customer resolution priority:
-  1. Exact ID / alias match      ("sams-club-atlanta", "samsatl")
+  1. Exact ID / alias match      ("acme-corp", "acme-corp")
   2. Window scan of full question — every 1–4 word phrase scored against registry
-     handles arbitrary phrasings: "solution numbers for sodimac colombia",
-     "check GMI's prod cluster", "why did sams club atlanta fall behind?"
-  3. Token Jaccard similarity    ("samsclub atl" ~ "sams-club-atlanta")
-  4. Normalised edit distance    ("samsclub" ~ "sams-club")
+     handles arbitrary phrasings: "solution numbers for acme-corp london",
+     "check acme-corp's prod cluster", "why did acme-corp fall behind?"
+  3. Token Jaccard similarity    ("acme corp" ~ "acme-corp")
+  4. Normalised edit distance    ("acmecorp" ~ "acme-corp")
 
 Environment resolution:
   - Regex on the question text:  "in prod", "dev cluster", "staging broke", etc.
@@ -96,8 +96,8 @@ def _best_window_score_and_phrase(question: str, customer: dict) -> tuple[float,
     (best_score, best_phrase) for this customer.  Skips windows that are
     entirely stopwords so generic phrases like "the solution" don't fire.
 
-    This lets us find "sodimac colombia" inside
-    "what are the solution numbers for sodimac colombia?" without needing
+    This lets us find "acme-corp london" inside
+    "what are the solution numbers for acme-corp london?" without needing
     the entity extractor to correctly isolate that substring first.
     """
     words = _norm(question).split()
@@ -211,7 +211,7 @@ class CustomerResolver:
 
         # ── Score every customer using BOTH hint and full-question window scan ─
         # Taking the max means the hint is a bonus, not a requirement: if the
-        # entity extractor mis-extracted "solution numbers" instead of "sodimac
+        # entity extractor mis-extracted "solution numbers" instead of "acme-corp
         # colombia", the window scan still finds the right customer.
         scored: list[tuple[float, dict, str | None]] = []  # (score, customer, matched_phrase)
         for c in customers:
